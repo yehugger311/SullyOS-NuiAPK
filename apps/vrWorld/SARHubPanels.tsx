@@ -14,6 +14,7 @@ import { FishArt } from './FishArt';
 import { SARNpcChibi } from './SARNpcArt';
 import { SARCollectionView } from './SARCollectionView';
 import { KanataTitleEditor } from './KanataTitleEditor';
+import { CoinCheatControl } from './CoinCheatControl';
 import './sar-hub.css';
 import './sar-collection-theme.css';
 
@@ -115,6 +116,7 @@ export function SARHubPanels({ panel, onClose, npcEnabled, onChangeNpc, caianMet
                 {npcEnabled && <KanataTitleEditor key={owner.id} ownerId={owner.id} unlocked={!!market?.sarFamiliarity?.unlocks.includes('titles') || !!userProfile.vrState?.title || characters.some(c=>!!c.vrState?.title)} earnedTitles={market?.sarFamiliarity?.titles}/>}
                 {error ? <p role="alert" className="sar-hub-error">{error}</p> : !market ? <p role="status" className="sar-hub-muted">正在打开仓库…</p> : <>
                     <div className="sar-hub-wallet"><div><span><Coins size={17}/>钱包余额</span><p><strong data-testid="sar-wallet-balance">{market.accounts[owner.id].toLocaleString()}</strong><small>鳞币</small></p></div><Package size={48} weight="light" aria-hidden="true"/></div>
+                    <CoinCheatControl ownerId={owner.id} actors={actors} market={market} />
                     <p className="sar-hub-allowance">今日还可回收 {remainingSARBuyback(market.buybackBudgets, owner.id)} / {SAR_DAILY_BUYBACK} 鳞币</p>
                     <nav className="sar-hub-filters" aria-label="物品分类">{([['all', '全部'], ['chip', '芯片'], ['module', '模块'], ['catch', '收藏'], ['souvenir', '纪念'], ['coupon','优惠券'], ['candy','糖果']] as const).filter(([value])=>npcEnabled || value !== 'souvenir').map(([value, label]) => <button type="button" key={value} aria-pressed={filter === value} onClick={() => { setFilter(value); setSelectedId(null); setItemPage(0); }}>{label}</button>)}</nav>
                     <div className="sar-hub-inventory-bar">
