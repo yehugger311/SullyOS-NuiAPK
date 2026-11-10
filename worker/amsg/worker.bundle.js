@@ -854,6 +854,7 @@ var init_userSpaces = __esm({
       "os_user_location_privacy_v1",
       "os_remote_vector_config",
       "os_cloud_backup_config",
+      "os_backup_preferences_v1",
       "os_realtime_config",
       "sully_proxy_worker_url",
       "sully_proxy_worker_url_v1",
@@ -1179,7 +1180,7 @@ var init_buildInfo = __esm({
   "utils/buildInfo.ts"() {
     "use strict";
     init_appVersion();
-    BUILD_LABEL = `${"main"}@${"92a84265"}`;
+    BUILD_LABEL = `${"main"}@${"8ae10b22"}`;
   }
 });
 
@@ -9817,6 +9818,11 @@ var wallClockToTimestamp = (wallClockText, tz) => {
   return t;
 };
 
+// utils/homeSchedule.ts
+function describeHomeScheduleRooms(rooms) {
+  return JSON.stringify(rooms.map(({ id, name, level }) => ({ id, name, floor: level + 1 })));
+}
+
 // utils/scheduleInjection.ts
 function getFlowNarrativeKey(hour) {
   if (hour < 12) return "morning";
@@ -9892,9 +9898,14 @@ ${rows.join("\n")}
   }
   const changeTarget = nextSlot ?? currentSlot;
   if (options2.includeChangeInstruction && withClock && changeTarget) {
+    const homeRooms = options2.homeRooms ?? [];
     out += `
 \u65E5\u7A0B\u662F\u4F60\u65E9\u4E0A\u7ED9\u81EA\u5DF1\u6392\u7684\u8BA1\u5212\uFF0C\u4E0D\u662F\u5FC5\u987B\u5C65\u884C\u7684\u547D\u4EE4\u3002\u771F\u5B9E\u53D1\u751F\u7684\u4E8B\u8DDF\u5B83\u5BF9\u4E0D\u4E0A\u65F6\uFF08\u6BD4\u5982\u8FD9\u4F1A\u513F\u8868\u4E0A\u5199\u7740\u7761\u89C9\u3001\u4F60\u5374\u9192\u7740\u5728\u8DDF\u5BF9\u65B9\u8BF4\u8BDD\uFF09\uFF0C\u628A\u5B83\u6539\u6210\u4F60\u5B9E\u9645\u5728\u505A\u7684\u4E8B\u5C31\u597D\u3002
-\u9700\u8981\u65F6\u5728\u56DE\u590D\u672B\u5C3E\u5355\u72EC\u8F93\u51FA\uFF1A[[ACTION:CHANGE_SCHEDULE | ${changeTarget.startTime} | \u53BB\u8D85\u5E02]]\uFF08\u65F6\u6BB5\u8981\u539F\u6837\u6284\u4E0A\u9762\u51FA\u73B0\u8FC7\u7684\u90A3\u51E0\u4E2A\uFF1B\u6B63\u5728\u8FDB\u884C\u7684\u8FD9\u4E00\u6761\u548C\u5B83\u4E4B\u540E\u7684\u90FD\u80FD\u6539\uFF0C\u5DF2\u7ECF\u8FC7\u53BB\u7684\u4E0D\u80FD\uFF09\u3002`;
+\u9700\u8981\u65F6\u5728\u56DE\u590D\u672B\u5C3E\u5355\u72EC\u8F93\u51FA\uFF1A[[ACTION:CHANGE_SCHEDULE | ${changeTarget.startTime} | \u53BB\u8D85\u5E02${homeRooms.length ? " | away:\u8D85\u5E02" : ""}]]\uFF08\u65F6\u6BB5\u8981\u539F\u6837\u6284\u4E0A\u9762\u51FA\u73B0\u8FC7\u7684\u90A3\u51E0\u4E2A\uFF1B\u6B63\u5728\u8FDB\u884C\u7684\u8FD9\u4E00\u6761\u548C\u5B83\u4E4B\u540E\u7684\u90FD\u80FD\u6539\uFF0C\u5DF2\u7ECF\u8FC7\u53BB\u7684\u4E0D\u80FD\uFF09\u3002`;
+    if (homeRooms.length) {
+      out += `
+\u5BB6\u56ED\u623F\u95F4\uFF1A${describeHomeScheduleRooms(homeRooms)}\u3002\u6BCF\u6761\u4FEE\u6539\u90FD\u8981\u5199\u65B0\u6D3B\u52A8\u7684\u4F4D\u7F6E\uFF1A\u5728\u5BB6\u7528\u7B2C\u56DB\u6BB5 home:\u623F\u95F4ID\uFF08\u53EA\u6284\u6E05\u5355\u4E2D\u7684 ID\uFF09\uFF0C\u5916\u51FA\u7528 away:\u5730\u70B9\uFF08\u5730\u70B9\u672A\u77E5\u65F6\u5199 away\uFF09\u3002\u4ECD\u5728\u539F\u623F\u95F4\u65F6\u4E5F\u8981\u5199\u51FA\u5B83\u7684 ID\u3002`;
+    }
   }
   out += `
 ${scopeNote}`;
@@ -9976,7 +9987,8 @@ var renderFireSceneBlock = (scene, nowMs, tz, options2) => {
       // 到点主动开口的角色最容易撞上「表上写着睡觉、我却正在给对方发消息」，
       // 所以这条路也要教。标签由 worker classifier 摘成 directive 随 push 回来、
       // 客户端落库；落库按 push 的 sentAt 判时段，隔夜的整批丢弃（见 scheduleChange）。
-      includeChangeInstruction: true
+      includeChangeInstruction: true,
+      homeRooms: scene.homeRooms
     }
   ).trim();
   const lines = [];
@@ -10458,7 +10470,7 @@ var describeFirePackVersion = (value) => {
     return `\u5305\u662F v${v}\u3001worker \u8981 v${FIRE_PACK_VERSION} \u2014\u2014 \u524D\u7AEF\u6BD4 worker \u65E7\uFF0C\u6253\u5F00\u4E00\u6B21\u7F51\u9875\u8BA9\u5B83\u91CD\u65B0\u4E0A\u4F20`;
   }
   if (typeof v === "number") {
-    return `\u5305\u662F v${v}\u3001worker \u53EA\u8BA4 v${FIRE_PACK_VERSION} \u2014\u2014 worker bundle \u662F\u65E7\u7684\uFF0C\u53BB\u8BBE\u7F6E\u9875\u91CD\u65B0\u7C98\u8D34\u90E8\u7F72`;
+    return `\u5305\u662F v${v}\u3001worker \u53EA\u8BA4 v${FIRE_PACK_VERSION} \u2014\u2014 worker bundle \u662F\u65E7\u7684\uFF0C\u53BB\u300C\u8BBE\u7F6E \u2192 \u4E3B\u52A8\u6D88\u606F 2.0\u300D\u70B9\u4E00\u4E0B\u300C\u66F4\u65B0 Worker\u300D`;
   }
   return "\u5305\u91CC\u6CA1\u6709\u7248\u672C\u53F7\uFF08\u6570\u636E\u635F\u574F\uFF09";
 };
@@ -21856,14 +21868,17 @@ var parseDirectiveBody = (input) => {
   if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) {
     return { recognized: true, directive: null };
   }
-  const activity = rest.slice(time.index + time[0].length).replace(/^\s*(?:[:：|=→>\-]+)\s*/u, "").replace(/[】\]]+\s*$/gu, "").trim();
+  const details = rest.slice(time.index + time[0].length).replace(/^\s*(?:[:：|=→>\-]+)\s*/u, "").replace(/[】\]]+\s*$/gu, "").trim();
+  const place = details.match(/\s*[|｜]\s*((?:home|away)\s*[:：][^|｜]*|away)\s*$/iu);
+  const activity = place ? details.slice(0, place.index).trim() : details;
   if (!activity) return { recognized: true, directive: null };
   return {
     recognized: true,
     directive: {
       startTime: `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`,
       // 日程卡本来就是短标题；截断异常长输出，避免一条标签撑坏 UI / prompt。
-      activity: activity.slice(0, 120)
+      activity: activity.slice(0, 120),
+      ...place ? { place: place[1].trim() } : {}
     }
   };
 };
@@ -22125,7 +22140,7 @@ function classifyLLMOutput(text3) {
   const scheduleParsed = extractScheduleChangeDirectives(textAfterTransfers);
   const textAfterSchedule = scheduleParsed.cleanedText;
   for (const d of scheduleParsed.directives) {
-    directives.push({ type: "change_schedule", time: d.startTime, activity: d.activity });
+    directives.push({ type: "change_schedule", time: d.startTime, activity: d.activity, ...d.place ? { place: d.place } : {} });
   }
   for (const spec of SIDE_EFFECT_TAGS) {
     const matches = Array.from(textAfterSchedule.matchAll(spec.re));
@@ -22834,7 +22849,7 @@ function processLLMRound(state, llmOutputText, build, mcp, schedule, iteration, 
   const declined = fullText.includes(AMSG_SILENT_MARK);
   const segments = declined ? [] : sanitizeIntoSegments(cleanedText);
   if (segments.length === 0) {
-    const scheduleChanges = directives.filter((d) => d.type === "change_schedule").map((d) => ({ startTime: d.time, activity: d.activity }));
+    const scheduleChanges = directives.filter((d) => d.type === "change_schedule").map((d) => ({ startTime: d.time, activity: d.activity, ...d.place ? { place: d.place } : {} }));
     return {
       decision: "skip-push",
       reason: declined ? "declined" : finishMeta ? "side-effects-only" : "empty-generation",
@@ -22892,7 +22907,7 @@ function buildScheduledPush(message, build, extraMeta, bannerBody) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-11-07.3";
+var AMSG_BUNDLE_VERSION = "2026-11-10";
 
 // worker/amsg/src/reproduction.ts
 async function writeDiagnosticStage(writeState, runId, event, fields = {}) {
@@ -23253,6 +23268,11 @@ var parseAmsgChatPresence = (raw2) => {
 var isFreshChatPresence = (value, charId, nowMs) => Boolean(
   value && value.v === 1 && value.charId === charId && value.activeAt <= nowMs + 1e4 && nowMs - value.activeAt <= CHAT_PRESENCE_TTL_MS
 );
+var chattedDuringFire = (value, charId, nowMs, seenLastUserMessageAt) => {
+  if (!value || value.charId !== charId) return false;
+  if (isFreshChatPresence(value, charId, nowMs)) return true;
+  return value.lastUserMessageAt != null && (seenLastUserMessageAt == null || value.lastUserMessageAt > seenLastUserMessageAt);
+};
 
 // worker/amsg/src/index.ts
 init_amsgToolPack();
@@ -27295,7 +27315,7 @@ function buildScheduleChangeResult(args) {
     v: 1,
     charId: args.charId,
     spokenAt: args.spokenAt,
-    directives: args.directives.map((d) => ({ startTime: d.startTime, activity: d.activity }))
+    directives: args.directives.map((d) => ({ startTime: d.startTime, activity: d.activity, ...d.place ? { place: d.place } : {} }))
   };
 }
 
@@ -28665,6 +28685,7 @@ var amsgHooks = {
       // （resolveFireSceneSong 与 renderFireSceneBlock 共用判定），冻的必然是正文里那首。
       sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz),
       instant,
+      overlapGuard: !instant && policy === "expire" ? { lastUserMessageAt } : null,
       instantInputKey,
       // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
       emotionEvalPromise: null,
@@ -28899,6 +28920,36 @@ ${userHoliday}` });
         sessionId: ctx.sessionId,
         pushes: decision.decision === "finish" ? decision.pushPayloads.length : 0
       });
+    }
+    if (decision.decision === "finish" && stash.overlapGuard) {
+      const presenceRows = await ctx.readState(amsgStateNamespace(stash.charId), { key: AMSG_CHAT_PRESENCE_KEY });
+      const presence = parseAmsgChatPresence(presenceRows.find((r) => r.key === AMSG_CHAT_PRESENCE_KEY)?.value);
+      if (chattedDuringFire(presence, stash.charId, Date.now(), stash.overlapGuard.lastUserMessageAt)) {
+        if (stash.scheduledTasks.length || stash.cancelledTasks.length || stash.renewedTasks.length) {
+          console.warn("[amsg:chat-overlap] \u751F\u6210\u671F\u95F4\u7528\u6237\u5F00\u53E3\u4E86\uFF0C\u4F46\u8FD9\u8F6E\u6539\u8FC7\u4EFB\u52A1\uFF0C\u7167\u5E38\u53D1\u51FA", { taskId });
+        } else {
+          console.log("[amsg:chat-overlap] \u751F\u6210\u671F\u95F4\u7528\u6237\u5F00\u53E3\u4E86\uFF0C\u8FD9\u6761\u4E0D\u53D1", {
+            taskId,
+            seenLastUserMessageAt: stash.overlapGuard.lastUserMessageAt,
+            presenceLastUserMessageAt: presence?.lastUserMessageAt ?? null
+          });
+          await writeLastSkip(ctx.writeState, stash.charId, {
+            v: 1,
+            taskUuid: stash.taskUuid,
+            occurrenceMs: stash.occurrenceMs,
+            reason: "chat-overlap",
+            skippedAt: Date.now()
+          });
+          await emitFireSkip(ctx.emitResult, {
+            charId: stash.charId,
+            taskUuid: stash.taskUuid,
+            occurrenceMs: stash.occurrenceMs,
+            reason: "chat-overlap",
+            task: findTaskBrief(stash.pendingTasks, stash.taskUuid)
+          });
+          return { decision: "skip-push" };
+        }
+      }
     }
     if (decision.decision === "skip-push" && decision.sideEffects) {
       if (typeof ctx.emitResult !== "function") throw new Error("AMSG2_RESULT_UNSUPPORTED: \u8BF7\u66F4\u65B0 Worker \u4EE5\u63A5\u6536\u52A8\u4F5C\u7ED3\u679C");
