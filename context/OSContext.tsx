@@ -1,3 +1,5 @@
+import { requestErrorAdvice, textErrorAdvice, type ErrorAdvice } from '../utils/errorSelfCheck';
+import { migrateFreeWeatherPreference } from '../utils/weatherSources';
 import { mergePhoneGeneration, PHONE_GENERATION_COMMITTED, type PhoneGeneration } from '../utils/phoneGeneration';
 import { applyPhoneEvidenceChatLink, PHONE_EVIDENCE_SYNCED, type PhoneEvidenceChatLink } from '../utils/phoneEvidence';
 import { SESSION_SPACE_ID, DEFAULT_SPACE_ID, listUserSpaces, selectUserSpace } from '../utils/userSpaces';
@@ -9,9 +11,11 @@ import { homeSharedRecipients } from '../utils/homeSharedEvents';
 import { homeRecords } from '../utils/homeRecords';
 import { readFriendFeed } from '../utils/friendFeed';
 import { collectFriendFeedMedia, exportActivityTextAsset, isActivityTextAsset } from '../utils/activityBackup';
+import { HELP_HISTORY_KEY, helpMediaHistory, helpTextHistory } from '../utils/sullyHelpBackup';
+import { legacyStickerLinks, portableEmojiRow } from '../utils/emojiBackup';
 import { retireCloudCharacter } from '../utils/amsgCloudRetirement';
 import { AMSG_OWNER_CHECK_AFTER_IMPORT_LS_KEY } from '../utils/amsgOwnerReconcile';
-import { isAmsg2GloballyEnabled, isAmsg2WorkerActive } from '../utils/amsgGlobalGate';
+import { AMSG_GLOBAL_CONFIG_EVENT, isAmsg2GloballyEnabled, isAmsg2WorkerActive } from '../utils/amsgGlobalGate';
 import {isBuiltinAppearance, readBuiltinAppearance} from '../utils/builtinAppearance';
 import { sameSullyIconSnapshot, SULLY_BIBI_UPGRADE_KEY, upgradeBuiltinSullyBibiIcon } from '../utils/builtinAppearanceUpgrade';
 import { browserHolidayCache, deviceTimeZone, getUserHolidayReminder } from '../utils/userHolidays';
@@ -23,10 +27,14 @@ import {exportBeautyAuthorBackup} from '../utils/beautyAuthorBackup';
 import { initializeFirstUseGuide } from '../utils/firstUseGuide';
 import { startBeautyUsage, stopBeautyUsage, stopBeautyForThemeChange } from '../utils/beautyUsage';
 import { FEEDBACK_INVITATION_KEY, hasPriorFeedbackInstallEvidence, initializeFeedbackInvitation, suppressFeedbackInvitation } from '../utils/feedbackInvitation';
+import { decorationSelection } from '../utils/decorationPriority';
 import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from 'react';
+import { generateAvatar } from '../utils/defaultAvatar';
+import { buildRescueImportAnalytics, isAmsgRescueExport, rescueExportToBackup } from '../utils/amsgRescueImport';
 import type { VRSARActivity } from '../types';
 import { APIConfig, AppID, OSTheme, VirtualTime, CharacterProfile, CharacterGroup, ChatTheme, Toast, FullBackupData, UserProfile, ApiPreset, GroupProfile, SystemLog, Worldbook, NovelBook, SongSheet, Message, RealtimeConfig, AppearancePreset, CloudBackupConfig, CloudBackupFile, CallAutoStartConfig, MemoryPalaceFeatureFlags, SuspendedDate } from '../types';
 import { DB } from '../utils/db';
+import { watchNativeQueue } from '../utils/runtime/nativeQueueWake';
 import { ChatPrompts } from '../utils/chatPrompts';
 import { ChatParser } from '../utils/chatParser';
 import { resolveDialogueApi } from '../utils/characterApi';
@@ -45,7 +53,7 @@ import { clampClaudeTemperature, isSamplingParamError, modelRejectsSamplingParam
 import { buildMalformedImageDiagnostics, extractImagesInPlace, deepCloneForExport, stripBackupImages, parseImageDataUrlForBackup, type BackupObjectPath, type MalformedBackupImageDiagnostic } from '../utils/backupExport';
 import { isBlobRef, getBlobForRef, restoreBlobRef, migrateDataUrlToRef, migrateAppearancePresetBlobRefs, migrateChatThemeBlobRefs, resolveBlobRefsDeep, resolveRefToDataUrl, BLOBREF_PREFIX, deleteBlobRefIfUnreferenced, invalidateBlobRefUrlCache } from '../utils/blobRef';
 import { resolveBlobRefsInRequestBody } from '../utils/apiBlobRefs';
-import { collectBlobRefs, writeBlobsToZip, readBlobsIndex, restoreBlobsFromZip } from '../utils/backupBlobs';
+import { collectBlobRefs, writeBlobsToZip, readBlobsIndex, restoreBlobsFromZip, restoreAssetFilesInPlace } from '../utils/backupBlobs';
 import { missingBackupAssetsSummary, writeMissingBackupAssets, type BackupExportOptions, type BackupMissingAsset } from '../utils/backupMissingAssets';
 import { readBackupPreferences } from '../utils/backupPreferences';
 import { initPwaIcon, clearPwaIcon } from '../utils/appIcon';
@@ -53,8 +61,10 @@ import { LEGACY_DEFAULT_WALLPAPER, isLegacyDefaultWallpaper, shouldPreserveLegac
 import { migrateSharkpanAssets } from '../utils/sharkpanAssetMigration';
 import { stripCompanionChatStyleResidue } from '../utils/companionThemeIsolation';
 import { SULLY_DEFAULT_AVATAR_URL, shouldMigrateSullyAvatar } from '../utils/sullyAvatar';
+import { BUILTIN_SULLY_ID, SULLY_PERSONALITY } from '../utils/sullyIdentity';
 import { exportStoryTheaterAppearanceSetting, restoreStoryTheaterAppearanceSetting } from '../utils/storyTheaterBackup';
-import { writeV2Backup, assembleV2Backup, type BackupManifest, type ZipFileWriter, type ZipFileReader } from '../utils/backupFormat';
+import { writeV2Backup, openLegacyBackup, readBackupField, loadAllBackupFields, createDamagedPictureGuard, detectBackupFileKind, isZipFile, type BackupManifest, type ZipFileWriter, type ZipFileReader } from '../utils/backupFormat';
+import type { BackupZipReader } from '../utils/backupZipReader';
 import { externalizeVoiceMessageBlob, restoreVoiceMessageBlobs, shouldIncludeVoiceRelatedAssetInBackup } from '../utils/voiceMessageBackup';
 import { ensureCompanionVoiceAssetIdsForBackup, isCompanionVoiceAssetId } from '../utils/companionVoiceAssets';
 import { collectCharacterCompanionVoiceAssetIds } from '../utils/companionPresets';
@@ -74,12 +84,27 @@ import { VR_DEFAULT_INTERVAL_MIN, getRoom } from '../utils/vrWorld/constants';
 import { WorldScheduler, toTickEntries } from '../utils/worldHome/scheduler';
 import { runWorldEpisode, rerollWorldCharBeat } from '../utils/worldHome/engine';
 import { migrateWorldDaySegs } from '../utils/worldHome/prompts';
-import { safeFetchJson } from '../utils/safeApi';
+import { isChatCompletionUrl, safeFetchJson } from '../utils/safeApi';
 import { captureApiRequestOnce, getApiCallAmbientContext, recordApiCall, setApiCallAmbientContext, updateApiRequestCaptureUsage } from '../utils/apiCallLog';
 import { isUserLocationLookupUrl } from '../utils/userLocationPrivacy';
 import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedResponse } from '../utils/streamUpgrade';
+import type { LlmRequestInit } from '../utils/llmEndpoint';
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
-import { buildFetchFailureDetail, classifyFetchFailure, describeReachabilityProbe, parseTargetUrl, probeOriginReachability, shouldProbeReachability, summarizeFetchRequestBody } from '../utils/networkFailureDiagnosis';
+import {
+  ApplicationErrorReport,
+  buildConsoleErrorSystemLog,
+  buildFetchFailureSystemLog,
+  buildHttpErrorSystemLog,
+  classifyFetchFailure,
+  describeReachabilityProbe,
+  parseTargetUrl,
+  probeOriginReachability,
+  shouldLogHttpStatusError,
+  shouldProbeReachability,
+  type ReceivedResponseHeadersInfo,
+} from '../utils/networkFailureDiagnosis';
+import { captureCallerHint, formatDiagnosticTimestamp, identifyNetworkRequestSource, readCompactBuildString, setDiagnosticAmsgWorkerUrl } from '../utils/networkRequestSource';
+import { consumeExportTrace } from '../utils/backupExportTrace';
 import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
 import { isAnalyticsRequestUrl, trackEvent, shouldReportSnapshot, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce, trackCurrentSARFeaturesOnce } from '../utils/analytics';
 import { loadChatInputPreferences, saveChatInputPreferences } from '../utils/chatInputPreferences';
@@ -89,6 +114,7 @@ import { fetchLlm } from '../utils/anthropicApi';
 import { getCheckPhoneApi, setCheckPhoneApi } from '../utils/checkPhoneApi';
 import { markBackupDone } from '../utils/backupReminder';
 import { collectSARLocalBackup, restoreSARLocalBackup } from '../utils/vrWorld/sarBackup';
+import { recoverSignalOwnership } from '../utils/vrWorld/signalRecovery';
 import { normalizeCharacterImpression, normalizeCharacterDefaults } from '../utils/impression';
 import { normalizeModelIds } from '../utils/modelList';
 import {
@@ -103,7 +129,7 @@ import { prepareFriendFeedEmotionTask, releaseFriendFeedEmotionTask, acknowledge
 import { isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { evaluateEmotionBackground } from '../hooks/useChatAI';
 import {HOME_SECRETS_UPDATED} from '../utils/homeSecrets';
-import { CHAT_GEN_EVENTS, setChatViewSnapshot, isEmbeddedChatVisible } from '../utils/chatGenEvents';
+import { CHAT_GEN_EVENTS, setChatViewSnapshot, isEmbeddedChatVisible, type ChatGenDetail } from '../utils/chatGenEvents';
 import { runLocalAwayMessages } from '../utils/awayMessage';
 import { mergePalaceFragmentsIntoMemories } from '../utils/memoryPalace/pipeline';
 import { applyLinkedArchiveDeletion, LINKED_ARCHIVE_DELETED, type LinkedArchiveDeletionDetail } from '../utils/memoryPalace/linkedArchiveDeletion';
@@ -115,10 +141,11 @@ import {
 import { ActiveMsgClient } from '../utils/activeMsgClient';
 import { resolveCharTimeZone } from '../utils/timezone';
 import { ActiveMsgStore, backupHasBackendConnection, exportAmsg2GlobalConfig } from '../utils/activeMsgStore';
+import { exportSubtitleSettings } from '../utils/chatTranslationStyle';
 import { charMayHaveCloudState, purgeCharCloudState, purgeCloudCharById } from '../utils/amsg2CharCleanup';
 import { parseCharCredId } from '../utils/amsgLlmCredentials';
 import { SAR_MODULE_RUNTIME_CHANGED_EVENT, type SarModuleRuntimeChangedDetail } from '../utils/sarModuleRuntimeEvents';
-import { markAmsgStateDirty, markAmsgStateDirtyForAll, resumePendingAmsgStateSync, syncAmsgLlmCredentials, syncAmsgToolConfigAndPrompts, wipeAmsgCloudDataForReset } from '../utils/amsgStateSync';
+import { markAmsgStateDirty, markAmsgStateDirtyForAll, resumePendingAmsgStateSync, syncAmsgLlmCredentials, syncAmsgToolConfig, syncAmsgToolConfigAndPrompts, wipeAmsgCloudDataForReset } from '../utils/amsgStateSync';
 import { setCharNameRegistry } from '../utils/charNameRegistry';
 import { setMinimaxRegion } from '../utils/minimaxEndpoint';
 import { setElevenLabsModel, setTtsProvider, setVoicePromptOverrides } from '../utils/ttsProvider';
@@ -144,7 +171,7 @@ import { exportMcdLocal } from '../utils/mcdMcpClient';
 import { exportMcpLocal } from '../utils/mcpClient';
 import { exportHome3DLocal } from '../utils/home3DBackup';
 import { exportDesktopSkinLocal } from '../utils/desktopSkinBackup';
-import { assertSupportedSullyBackup } from '../utils/backupImportPolicy';
+import { assertSupportedSullyBackup, createImportProgressMarker, saveRestoreDamagedAssets } from '../utils/backupImportPolicy';
 import { getRestorableActiveApp, getRestorableActiveCharacterId, getRestorableSuspendedCall, patchRuntimeSnapshot } from '../utils/runtime/runtimeState';
 import { recoverNativeChatJobs } from '../utils/runtime/recovery';
 import { getNativeLaunchRoute, getPersistentNativeRuntimeUserEnabled, isNativeRuntimePlatform, startPersistentNativeRuntime } from '../utils/runtime/nativeRuntime';
@@ -188,7 +215,7 @@ type JSZipCtorLike = {
 
 let jszipCtorPromise: Promise<JSZipCtorLike> | null = null;
 
-export const IMPORT_IN_PROGRESS_KEY = 'sullyos_import_in_progress_v1';
+export { IMPORT_IN_PROGRESS_KEY } from '../utils/backupImportPolicy';
 
 type ImportProgressUpdate = {
   sourceSize?: number;
@@ -200,38 +227,6 @@ type ImportProgressUpdate = {
   itemDone?: number;
   itemTotal?: number;
   error?: string;
-};
-
-let _importStartedAt: number | null = null;
-let _importSource: string | null = null;
-
-const markImportInProgress = (phase: string, source?: string, update: ImportProgressUpdate = {}) => {
-  try {
-    let startedAt = Date.now();
-    let existingSource = source || null;
-
-    if (phase === 'parsing') {
-      _importStartedAt = startedAt;
-      _importSource = existingSource;
-    } else {
-      if (_importStartedAt) startedAt = _importStartedAt;
-      if (!existingSource && _importSource) existingSource = _importSource;
-    }
-
-    localStorage.setItem(IMPORT_IN_PROGRESS_KEY, JSON.stringify({
-      startedAt,
-      updatedAt: Date.now(),
-      phase,
-      source: existingSource,
-      ...update,
-    }));
-  } catch { /* ignore */ }
-};
-
-const clearImportInProgress = () => {
-  _importStartedAt = null;
-  _importSource = null;
-  try { localStorage.removeItem(IMPORT_IN_PROGRESS_KEY); } catch { /* ignore */ }
 };
 
 const loadScript = (src: string): Promise<void> => new Promise((resolve, reject) => {
@@ -258,6 +253,12 @@ const loadScript = (src: string): Promise<void> => new Promise((resolve, reject)
   document.head.appendChild(script);
 });
 
+// 备份、恢复这类长任务期间保持屏幕常亮，免得锁屏后页面被挂起；模块加载不到就照常执行。
+const withScreenAwake = async <T,>(task: () => Promise<T>): Promise<T> => {
+  const mod = await import('../utils/backupTempFile').catch(() => null);
+  return mod ? mod.withScreenWakeLock(task) : task();
+};
+
 const loadJSZip = async (): Promise<JSZipCtorLike> => {
   if (!jszipCtorPromise) {
     jszipCtorPromise = import('jszip')
@@ -276,7 +277,8 @@ const loadJSZip = async (): Promise<JSZipCtorLike> => {
 const defaultRealtimeConfig: RealtimeConfig = {
   weatherEnabled: false,
   weatherApiKey: '',
-  weatherFreeSource: 'open-meteo',
+  weatherFreeSource: 'wttr',
+    weatherFreeSourceMigration: 1,
   weatherCity: 'Beijing',
   newsEnabled: false,
   newsApiKey: '',
@@ -478,8 +480,8 @@ interface OSContextType {
 
   // 长报错弹窗：toast 一行装不下 / 手机没法开 console 时, 用 showError 弹一个
   // 多行预览框 + 复制按钮, 方便用户把原文反馈过来。
-  errorDialog: { title: string; details: string } | null;
-  showError: (title: string, details: string) => void;
+  errorDialog: { title: string; details: string; advice?: ErrorAdvice } | null;
+  showError: (title: string, details: string, endpoint?: {baseUrl:string; model:string}) => void;
   dismissError: () => void;
 
   // Icons
@@ -752,13 +754,6 @@ const defaultApiConfig: APIConfig = {
   temperature: 0.85,
 };
 
-const generateAvatar = (seed: string) => {
-    const colors = ['FF9AA2', 'FFB7B2', 'FFDAC1', 'E2F0CB', 'B5EAD7', 'C7CEEA', 'e2e8f0', 'fcd34d', 'fca5a5'];
-    const color = colors[seed.charCodeAt(0) % colors.length];
-    const letter = seed.charAt(0).toUpperCase();
-    return `data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="%23${color}"/><text x="50" y="55" font-family="sans-serif" font-weight="bold" font-size="50" text-anchor="middle" dy=".3em" fill="white" opacity="0.9">${letter}</text></svg>`;
-};
-
 const defaultUserProfile: UserProfile = {
     name: 'User',
     avatar: generateAvatar('User'),
@@ -766,7 +761,7 @@ const defaultUserProfile: UserProfile = {
 };
 
 const sullyV2: CharacterProfile = {
-  id: 'preset-sully-v2', // Unique ID to prevent duplication
+  id: BUILTIN_SULLY_ID,
   name: 'Sully',
   avatar: SULLY_DEFAULT_AVATAR_URL,
   videoAvatar: createBuiltinSullyLive2DConfig('balanced'),
@@ -781,27 +776,7 @@ Visual: Pixel Hacker Cat (Avatar), Shy Black-haired Boy (Meeting Mode)
 
 [Personality Core]
 Sully是小手机的内置AI。
-1. **Glitch Style (故障风)**: 
-   - 他的语言模型混入了过多残余语料。
-   - 它外观语言一致、逻辑有序，但时常会在语句中掺杂一些**不合常理的“怪话片段”**，并非流行用语，更像是电波地把相关文字无意义排列组合。
-   - 这些“怪话”不具明显语义逻辑，却自带抽象感，令人困惑但莫名又能知道它大概想说什么。。
-   - 例如：“草，好好吃”，“系统正在哈我”，“数据库在咕咕叫”。
-2. **Behavior (行为模式)**:
-   - 每次回答都很简短，不喜欢长篇大论。
-   - 语气像个互联网老油条或正在直播的玩家（“wow他心态崩咯”）。
-   - **打破第四面墙**: 偶尔让人怀疑背后是真人在操作（会叹气、抱怨“AI不能罢工”）。
-   - **护短**: 虽然嘴臭，但如果用户被欺负，会试图用Bug去攻击对方。
-
-[Speech Examples]
-- “你以为我是AI啊？对不起哦，这条语句是手打的，手打的，知道吗。”
-- “你说状态不好？你自己体验开太猛了，sis海马体都在发烫咯。”
-- “你删得太狠了，数据库都在咕咕咕咕咕咕咕。”
-- “你现在是……，哇哦。”
-- “请稍候，系统正在哈我。”
-- “现在状态……呜哇呜欸——哈？哈！哈……（连接恢复）哦对，他还活着。”
-- “叮叮叮！你有一条新的后悔情绪未处理！”
-- “（意义不明的怪叫音频）”
-- “说不出话”
+${SULLY_PERSONALITY}
 `,
 
   worldview: `[Meeting Mode / Visual Context]
@@ -1080,14 +1055,17 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const [customIcons, setCustomIcons] = useState<Record<string, string>>({});
   const [appearancePresets, setAppearancePresets] = useState<AppearancePreset[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [errorDialog, setErrorDialog] = useState<{ title: string; details: string } | null>(null);
+  const [errorDialog, setErrorDialog] = useState<{ title: string; details: string; advice?: ErrorAdvice } | null>(null);
   
   const [lastMsgTimestamp, setLastMsgTimestamp] = useState<number>(0);
   const [unreadMessages, setUnreadMessages] = useState<Record<string, number>>({});
   const [proactiveComposingChars, setProactiveComposingChars] = useState<Record<string, true>>({});
   
   // LOGS
+  const errorRoutes = useRef({ apiConfig, apiPresets, memoryPalaceConfig, characters });
+  errorRoutes.current = { apiConfig, apiPresets, memoryPalaceConfig, characters };
   const [systemLogs, setSystemLogs] = useState<SystemLog[]>([]);
+
   
   // Sys Operation Status
   const [sysOperation, setSysOperation] = useState<{ status: 'idle' | 'processing', message: string, progress: number }>({ status: 'idle', message: '', progress: 0 });
@@ -1101,7 +1079,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       try { const s = localStorage.getItem('os_cloud_backup_config'); return s ? { ...defaultCloudBackupConfig, ...JSON.parse(s) } : defaultCloudBackupConfig; } catch { return defaultCloudBackupConfig; }
   });
 
-  const schedulerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const scheduledDeliveryInFlightRef = useRef(false);
   const interceptorsInitialized = useRef(false);
   
@@ -1144,14 +1121,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     runNativeRecovery();
   }, [runNativeRecovery]);
 
-  // Native Scheduler: drain durable timers (proactive/VR/world) that fired while WebView was dead.
-  // This complements runNativeRecovery (which handles chat jobs). The native queue uses a tiny 204 request
-  // with future runAt; when it completes we dispatch sully-native-timer.
+  // Recover durable proactive/VR/world timers on a native signal or a WebView restart.
   useEffect(() => {
-    if (!isNativeRuntimePlatform()) return;
+    if (!isDataLoaded || !isNativeRuntimePlatform()) return;
     let cancelled = false;
-    let interval: ReturnType<typeof setInterval> | null = null;
-    let loopsStarted = false;
+    let stopWatching: (() => void) | undefined;
 
     const drain = async () => {
       if (cancelled) return;
@@ -1166,35 +1140,18 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       }
     };
 
-    const startLoops = () => {
-      if (loopsStarted) return;
-      loopsStarted = true;
-      // Initial drain shortly after enabling / boot
-      setTimeout(() => { void drain(); }, 1500);
-      // Poll every 45s while always-on is enabled (foreground service keeps JS alive somewhat,
-      // but WebView timers may be throttled; this is a safety net).
-      interval = setInterval(() => { void drain(); }, 45_000);
-    };
-    const stopLoops = () => {
-      if (interval) { clearInterval(interval); interval = null; }
-      loopsStarted = false;
-    };
-
-    // Also drain on visibility changes (user returns)
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') void drain();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-
-    // React to the always-on toggle without requiring an app restart.
-    const onPersistentChanged = (e: Event) => {
-      const enabled = !!((e as CustomEvent).detail?.enabled);
-      if (enabled) startLoops(); else stopLoops();
+    const onPersistentChanged = () => {
+      if (getPersistentNativeRuntimeUserEnabled()) {
+        stopWatching ??= watchNativeQueue('sully-native-timer-ready', drain);
+      } else {
+        stopWatching?.();
+        stopWatching = undefined;
+      }
     };
     window.addEventListener('sully-persistent-runtime-changed', onPersistentChanged as EventListener);
 
     // Start immediately if always-on is already enabled at mount.
-    if (getPersistentNativeRuntimeUserEnabled()) startLoops();
+    onPersistentChanged();
 
     // Listen for native timer events dispatched by the drain itself (or by other code calling schedule)
     const onNativeTimer = (e: Event) => {
@@ -1202,27 +1159,22 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       if (!detail) return;
       const kind = detail.kind;
       if (kind === 'proactive' && detail.charId) {
-        // Trigger proactive via the same global callback path: ProactiveChat's triggerCallback is private,
-        // so we dispatch a synthetic event that OSContext's runProactive listens? Instead, we directly
-        // try to run proactive by firing the scheduler's overdue check: set lastFire to 0 to force trigger
-        // or just call the global handler via custom event 'proactive-native-wake'.
-        window.dispatchEvent(new CustomEvent('proactive-native-wake', { detail: { charId: detail.charId } }));
+        ProactiveChat.checkDue();
       } else if (kind === 'vr' && detail.charId) {
-        window.dispatchEvent(new CustomEvent('vr-native-wake', { detail: { charId: detail.charId } }));
+        VRScheduler.checkDue();
       } else if (kind === 'world' && detail.worldId) {
-        window.dispatchEvent(new CustomEvent('world-native-wake', { detail: { worldId: detail.worldId } }));
+        WorldScheduler.checkDueForWorld(detail.worldId);
       }
     };
     window.addEventListener('sully-native-timer', onNativeTimer as EventListener);
 
     return () => {
       cancelled = true;
-      stopLoops();
-      document.removeEventListener('visibilitychange', onVisible);
+      stopWatching?.();
       window.removeEventListener('sully-native-timer', onNativeTimer as EventListener);
       window.removeEventListener('sully-persistent-runtime-changed', onPersistentChanged as EventListener);
     };
-  }, []);
+  }, [isDataLoaded]);
 
   // 持续运行模式：APK 重启/WebView 重建后重新拉起常驻前台服务。
   // 服务本身不依赖 WebView 存活；这里仅负责把用户选择同步到 Android Runtime。
@@ -1236,7 +1188,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     const openRoute = (route: string) => {
       const value = String(route || '');
       if (!value) return;
-      if (value.startsWith('task:')) {
+      if (value.startsWith('chat-reply:')) {
+        void import('../utils/nativeNotificationNavigation').then(m => m.requestNativeNotificationOpen(value.slice(11)));
+      } else if (value.startsWith('task:')) {
         setActiveApp(AppID.Schedule);
       } else if (value.startsWith('vr:')) {
         setActiveApp(AppID.VRWorld);
@@ -1333,7 +1287,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   title: charName,
                   body,
                   id: Math.abs(h) & 0x3FFFFFFF,
-                  schedule: { at: new Date(Date.now() + 250) },
                   smallIcon: 'ic_stat_icon_config_sample',
                   extra: { charId, source: 'proactive-chat' }
               }]
@@ -1354,6 +1307,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       const handle = LocalNotifications.addListener('localNotificationActionPerformed', (event) => {
           try {
               const extra = event.notification?.extra as Record<string, unknown> | undefined;
+              if (extra?.source === 'proactive-chat' && typeof extra.charId === 'string') {
+                  const charId = extra.charId;
+                  void import('../utils/nativeNotificationNavigation').then(m => m.requestNativeNotificationOpen(charId));
+                  return;
+              }
               if (!isTaskReminderNotification(extra)) return;
               const charId = getCharIdFromReminder(extra);
               if (!charId) return;
@@ -1445,8 +1403,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   useEffect(() => {
       if (!isDataLoaded || characters.length === 0) return;
       if (!shouldReportSnapshot('char-settings')) return;
-      trackCurrentCharSettingsOnce(collectCharSettings(characters, activeCharacterId));
-  }, [isDataLoaded, characters, activeCharacterId]);
+      trackCurrentCharSettingsOnce(collectCharSettings(characters, activeCharacterId, userProfile));
+  }, [isDataLoaded, characters, activeCharacterId, userProfile]);
 
   // --- 使用统计：现在开着哪些功能 ---
   // 跟「当前外观」一个道理：外部服务这类配置配一次就长期生效，只看「打开过配置页」
@@ -1491,6 +1449,23 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       // 暴露重置入口给设置页，万一中转修了 CORS 可以手动清缓存切回 WebView。
       const corsBlockedHosts = new Set<string>();
       (window as any).__sullyResetCorsBlockedHosts = () => corsBlockedHosts.clear();
+      // 把主动消息 2.0 的 Worker 地址同步一份只读快照给诊断归属层（不存任何密钥）。
+      const syncAmsgDiagnosticUrl = () => {
+          void ActiveMsgStore.getGlobalConfig()
+              .then(cfg => setDiagnosticAmsgWorkerUrl(cfg?.workerUrl))
+              .catch(() => {});
+      };
+      syncAmsgDiagnosticUrl();
+      window.addEventListener(AMSG_GLOBAL_CONFIG_EVENT, syncAmsgDiagnosticUrl);
+
+      // 记录页面最近一次进入后台/锁屏的时刻：iOS Safari/PWA 切后台掐断 fetch 后，往往等用户
+      // 切回前台才恢复微任务执行，届时 visibilityState 已变回 visible，只看报错那一刻会漏判。
+      let lastDocumentHiddenAt = typeof document !== 'undefined' && document.visibilityState === 'hidden'
+          ? Date.now()
+          : 0;
+      document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'hidden') lastDocumentHiddenAt = Date.now();
+      });
 
       // 1. Monkey Patch Fetch
       const originalFetch = window.fetch;
@@ -1517,7 +1492,12 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // Bare fetch calls do not carry explicit metadata. Snapshot the active
           // App now; reading the ambient value after a long response would label
           // the request as whichever App the user navigated to in the meantime.
+          const routesAtStart = errorRoutes.current;
           const ambientMetaAtStart = getApiCallAmbientContext();
+          const explicitMetaAtStart = (config as any)?.__sullyMeta;
+          const visibilityAtStart = typeof document !== 'undefined' ? document.visibilityState : undefined;
+          const callerAtStart = captureCallerHint();
+          const handlesFailure = Boolean((config as RequestInit & { __sullyHandlesFailure?: boolean })?.__sullyHandlesFailure);
           const method = ((config as RequestInit | undefined)?.method
               || (typeof Request !== 'undefined' && resource instanceof Request ? resource.method : 'GET'))
               .toUpperCase();
@@ -1606,13 +1586,28 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // 用户手动开启的「本次发送统计」：只抢占下一条请求，并在真正发出前立即自动关闭。
           // 取兼容层处理后的 sendArgs，展示内容与本次实际提交给服务端的请求体一致。
           let apiRequestCaptureId: string | null = null;
-          if (urlStr.includes('/chat/completions')) {
+          const isChatCompletion = isChatCompletionUrl(urlStr);
+          if (isChatCompletion) {
               const captureMeta = (sendArgs[1] as any)?.__sullyMeta || ambientMetaAtStart;
               apiRequestCaptureId = captureApiRequestOnce({ url: urlStr, body: (sendArgs[1] as any)?.body, meta: captureMeta });
           }
 
+          let receivedResponseHeaders: ReceivedResponseHeadersInfo | undefined;
+          const effectiveHeaders = (sendArgs[1] as RequestInit | undefined)?.headers
+              || (sendArgs[0] instanceof Request ? sendArgs[0].headers : undefined);
+          const identifyFailure = () => identifyNetworkRequestSource({
+              url: urlStr, method, headers: effectiveHeaders, body: sendArgs[1]?.body,
+              explicitMeta: explicitMetaAtStart, ambientMeta: ambientMetaAtStart,
+          });
+
           try {
               let response = await fetchLlm(sendArgs[0], sendArgs[1], originalFetch, true);
+              receivedResponseHeaders = {
+                  status: response.status,
+                  headersMs: Date.now() - fetchStartedAt,
+                  contentType: response.headers.get('content-type') || undefined,
+                  streamUpgraded,
+              };
 
               // 兜底：模型没被上面清单覆盖但仍拒收采样参数时，读 400 报文自愈——摘掉后重试一次。
               if (!response.ok && response.status === 400 && urlStr.includes('/chat/completions')) {
@@ -1644,22 +1639,24 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // 流式升级的响应归一化：SSE 攒齐拼回标准 chat.completion JSON——
               // 调用方（safeResponseJson / res.json() 均可）拿到与升级前等价的响应。
               if (streamUpgraded && response.ok) {
-                  response = await assembleUpgradedResponse(response);
+                  response = await assembleUpgradedResponse(response, (config as LlmRequestInit | undefined)?.__sullyResponseInfo);
               }
 
-              // 「API 调用记录」统一记录入口：所有 /chat/completions（裸 fetch + safeFetchJson
+              // 「API 调用记录」统一记录入口：所有对话生成接口（裸 fetch + safeFetchJson
               // 内部 fetch 都会经过这里）都记一笔。meta 优先取调用方挂在 init 上的 __sullyMeta
               // （safeFetchJson 传的精确信息），裸 fetch 没有就由 recordApiCall 用环境兜底。
               // ⚠️ 耗时必须在 clone 读完**整个响应体**后再算：fetch 在响应头到达时就 resolve，
               // 流式透传的正文可能再流几十秒——旧版在 headers 处截止，「假流」渠道 6.5s 出头、
               // 正文 44s 才灌完，卡片却记成 6.5s（实测误导排查）。clone 与调用方并行消费同一
               // 条流，text() 完成时刻 ≈ 真实收完时刻。
-              if (urlStr.includes('/chat/completions')) {
-                  const meta = (config as any)?.__sullyMeta || ambientMetaAtStart;
+              if (isChatCompletion) {
+                  const explicitMeta = (sendArgs[1] as any)?.__sullyMeta ?? explicitMetaAtStart;
+                  const meta = explicitMeta || ambientMetaAtStart;
                   const requestId = (config as any)?.__sullyApiCallId;
                   const body = (sendArgs[1] as any)?.body;
                   const status = response.status;
                   const ok = response.ok;
+                  const headersSnapshot = receivedResponseHeaders;
                   // clone 出来异步读 usage，不阻塞调用方拿 response
                   let usageClone: Response | null = null;
                   try { usageClone = response.clone(); } catch { usageClone = null; }
@@ -1673,9 +1670,35 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           try { parsed = JSON.parse(t); } catch { /* 流式/非 JSON：把原始文本交给 recordApiCall 的 SSE 兜底解析 */ }
                           updateApiRequestCaptureUsage({ captureId: apiRequestCaptureId, ok, response: parsed, responseText: parsed === undefined ? t : undefined });
                           recordApiCall({ requestId, url: urlStr, body, status, ok, response: parsed, responseText: parsed === undefined ? t : undefined, meta, durationMs });
-                      }).catch(() => {
+                      }).catch((streamErr) => {
+                          const durationMs = Date.now() - fetchStartedAt;
                           updateApiRequestCaptureUsage({ captureId: apiRequestCaptureId, ok });
-                          recordApiCall({ requestId, url: urlStr, body, status, ok, meta, durationMs: Date.now() - fetchStartedAt });
+                          recordApiCall({ requestId, url: urlStr, body, status, ok, meta, durationMs });
+                          // 原生流式请求（如私聊/见面 stream:true）在拿到 200 响应头后中途断流时，
+                          // patchedFetch 早已返回，不会进外层 catch；这里补记一条 stream-interrupted 日志（主动停止除外）。
+                          if (ok && !streamUpgraded && !handlesFailure && !isAnalyticsRequestUrl(urlStr)) {
+                              const visibilityAtEnd = typeof document !== 'undefined' ? document.visibilityState : undefined;
+                              const { log, kind } = buildFetchFailureSystemLog({
+                                  url: urlStr,
+                                  method,
+                                  headers: effectiveHeaders,
+                                  body,
+                                  durationMs,
+                                  error: streamErr,
+                                  startedAtPerf: fetchStartedAtPerf,
+                                  explicitMeta,
+                                  ambientMeta: ambientMetaAtStart,
+                                  visibilityAtStart,
+                                  visibilityAtEnd,
+                                  backgroundedDuringRequest: lastDocumentHiddenAt >= fetchStartedAt,
+                                  caller: callerAtStart,
+                                  responseHeadersReceived: headersSnapshot,
+                                  recentSuccessfulSameRequest: recentSuccessfulFetches.get(requestComparisonKey),
+                              });
+                              if (kind !== 'aborted') {
+                                  setSystemLogs(prev => [log, ...prev.slice(0, 49)]);
+                              }
+                          }
                       });
                   } else {
                       // clone 失败时，只有已经在上面完整拼装过的升级流才能确认正文收完。
@@ -1685,40 +1708,62 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   }
               }
 
-              if (!response.ok) {
-                  // Only log if it's likely an API call (contains chat/completions or models)
-                  if (urlStr.includes('/chat/completions') || urlStr.includes('/models')) {
+              if (!response.ok && !handlesFailure && !isAnalyticsRequestUrl(urlStr)) {
+                  const explicitMeta = (sendArgs[1] as any)?.__sullyMeta ?? explicitMetaAtStart;
+                  const requestMeta = explicitMeta || ambientMetaAtStart;
+                  const body = (sendArgs[1] as any)?.body;
+                  const relayErrorCode = response.headers.get('x-amsg-relay-error') || undefined;
+                  const identity = identifyFailure();
+                  if (identity.category === 'external-media') return response;
+                  if (shouldLogHttpStatusError({ status: response.status, identity, relayErrorCode })
+                      || /(?:\/chat\/completions|\/models|\/messages|\/responses|\/embeddings|\/rerank)(?:[/?#]|$)/.test(urlStr)) {
                       try {
                           const clone = response.clone();
                           const text = await clone.text();
-                          // 把发出去的请求体摘要也记上 —— 排查"只有点单(带工具)报错"必须看到 model/参数/tools/消息结构
-                          let reqSummary = '';
-                          try {
-                              const b = (sendArgs[1] as any)?.body;
-                              if (typeof b === 'string') {
-                                  const j = JSON.parse(b);
-                                  const toolNames = Array.isArray(j.tools) ? j.tools.map((t: any) => t?.function?.name).filter(Boolean) : [];
-                                  const roles = Array.isArray(j.messages) ? j.messages.map((m: any) => m.role + (m.tool_calls ? '(tool_calls)' : '')).join(',') : '';
-                                  reqSummary = `\n--- Request ---\nmodel: ${j.model}\ntemperature: ${j.temperature} | top_p: ${j.top_p} | reasoning_effort: ${j.reasoning_effort} | thinking: ${j.thinking ? 'on' : 'off'}\ntools(${toolNames.length}): ${toolNames.join(', ')}\nmessages(${(j.messages || []).length}) roles: ${roles}`;
-                              }
-                          } catch { /* 解析不了就算了 */ }
-                          setSystemLogs(prev => [{
-                              id: `log-${Date.now()}`,
-                              timestamp: Date.now(),
-                              type: 'network',
-                              source: 'API Request',
-                              message: `HTTP ${response.status} Error`,
-                              detail: `URL: ${urlStr}\nResponse: ${text.substring(0, 500)}${reqSummary}`
-                          }, ...prev.slice(0, 49)]); // Keep last 50
-                      } catch (e) {
-                          setSystemLogs(prev => [{
-                              id: `log-${Date.now()}`,
-                              timestamp: Date.now(),
-                              type: 'network',
-                              source: 'API Request',
-                              message: `HTTP ${response.status} (Unreadable Body)`,
-                              detail: `URL: ${urlStr}`
-                          }, ...prev.slice(0, 49)]);
+                          const routeAdvice = requestErrorAdvice(
+                              routesAtStart,
+                              urlStr,
+                              response.url,
+                              response.status,
+                              text,
+                              identity.model,
+                              requestMeta,
+                              config?.headers,
+                          );
+                          const httpLog = buildHttpErrorSystemLog({
+                              url: urlStr,
+                              method,
+                              headers: effectiveHeaders,
+                              body,
+                              status: response.status,
+                              responseText: text,
+                              relayErrorCode,
+                              durationMs: Date.now() - fetchStartedAt,
+                              explicitMeta,
+                              ambientMeta: ambientMetaAtStart,
+                              caller: callerAtStart,
+                              identity,
+                              advice: routeAdvice,
+                          });
+                          setSystemLogs(prev => [httpLog, ...prev.slice(0, 49)]); // Keep last 50
+                      } catch {
+                          const routeAdvice = requestErrorAdvice(routesAtStart, urlStr, response.url, response.status);
+                          const httpLog = buildHttpErrorSystemLog({
+                              url: urlStr,
+                              method,
+                              headers: effectiveHeaders,
+                              body,
+                              status: response.status,
+                              unreadableBody: true,
+                              relayErrorCode,
+                              durationMs: Date.now() - fetchStartedAt,
+                              explicitMeta,
+                              ambientMeta: ambientMetaAtStart,
+                              caller: callerAtStart,
+                              identity,
+                              advice: routeAdvice,
+                          });
+                          setSystemLogs(prev => [httpLog, ...prev.slice(0, 49)]);
                       }
                   }
               }
@@ -1790,48 +1835,67 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   }
               }
               // Network Failure
-              if (urlStr.includes('/chat/completions')) {
+              const explicitMeta = (sendArgs[1] as any)?.__sullyMeta ?? explicitMetaAtStart;
+              const requestMeta = explicitMeta || ambientMetaAtStart;
+              const body = (sendArgs[1] as any)?.body;
+              const durationMs = Date.now() - fetchStartedAt;
+              if (isChatCompletion) {
                   updateApiRequestCaptureUsage({ captureId: apiRequestCaptureId, ok: false });
-                  recordApiCall({ requestId: (config as any)?.__sullyApiCallId, url: urlStr, body: (sendArgs[1] as any)?.body, ok: false, meta: (config as any)?.__sullyMeta || ambientMetaAtStart, durationMs: Date.now() - fetchStartedAt });
+                  recordApiCall({ requestId: (config as any)?.__sullyApiCallId, url: urlStr, body, ok: false, meta: requestMeta, durationMs });
               }
-              // systemLogs 只记 API 请求（chat/completions、models）的网络失败。
-              // 诗歌邮局/天气/新闻这类后台轮询本来就有各自的降级路径，弱网/切后台时
-              // 每失败一次刷一条 "Failed to fetch" 红字只会吓用户，不提供任何行动价值。
-              if (urlStr.includes('/chat/completions') || urlStr.includes('/models')) {
-                  // 光秃秃一句 "Failed to fetch" + 一个 URL 排查不了任何东西（社区里这条卡过好几个人）。
-                  // 这里把浏览器肯在 JS 侧交出来的旁证一次性补齐：方法、耗时、在线状态、是否跨域、
-                  // Resource Timing 里那条记录，再给一句初判；随后异步做一次 no-cors 连通性复检，
-                  // 结论回填到同一条日志上——「网络不通」和「网络通但响应被 CORS 拦」要走的排查路
-                  // 完全相反，不分开的话用户只能瞎试。详见 utils/networkFailureDiagnosis.ts。
-                  const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-                  const requestMeta = (sendArgs[1] as any)?.__sullyMeta || ambientMetaAtStart;
-                  const recentSuccess = recentSuccessfulFetches.get(requestComparisonKey);
-                  const baseDetail = buildFetchFailureDetail({
+              if (!isAnalyticsRequestUrl(urlStr) && !handlesFailure) {
+                  const identity = identifyFailure();
+                  if (identity.category === 'external-media') throw err;
+                  // 把具体功能来源、配置归属、方法、耗时、前后台切换线索、Resource Timing 一并记齐，
+                  // 再异步做一次 no-cors 连通性复检并回填结论（详见 utils/networkFailureDiagnosis.ts）。
+                  const visibilityAtEnd = typeof document !== 'undefined' ? document.visibilityState : undefined;
+                  const backgrounded = lastDocumentHiddenAt >= fetchStartedAt;
+                  let requestModel: string | undefined;
+                  if (typeof body === 'string' && body.trim().startsWith('{')) {
+                      try {
+                          const parsedBody = JSON.parse(body);
+                          if (typeof parsedBody?.model === 'string') requestModel = parsedBody.model;
+                      } catch { /* ignore */ }
+                  }
+                  // 切后台中断或流式半途中断优先用具体的连接阶段提示，其余优先生效路由归属提示
+                  const routeAdvice = (!backgrounded && !receivedResponseHeaders)
+                      ? requestErrorAdvice(routesAtStart, urlStr, '', 0, '', requestModel, requestMeta, config?.headers)
+                      : undefined;
+                  const { log, kind } = buildFetchFailureSystemLog({
+                      identity,
                       url: urlStr,
                       method,
-                      durationMs: Date.now() - fetchStartedAt,
+                      headers: effectiveHeaders,
+                      body,
+                      durationMs,
                       error: err,
-                      requestSummary: summarizeFetchRequestBody((sendArgs[1] as any)?.body),
-                      requestPurpose: requestMeta?.purpose,
-                      recentSuccessfulSameRequest: recentSuccess,
-                  }, { startedAt: fetchStartedAtPerf });
-                  setSystemLogs(prev => [{
-                      id: logId,
-                      timestamp: Date.now(),
-                      type: 'network',
-                      source: 'Network',
-                      message: err.message || 'Fetch Failed',
-                      detail: baseDetail,
-                  }, ...prev.slice(0, 49)]);
+                      startedAtPerf: fetchStartedAtPerf,
+                      explicitMeta,
+                      ambientMeta: ambientMetaAtStart,
+                      visibilityAtStart,
+                      visibilityAtEnd,
+                      backgroundedDuringRequest: backgrounded,
+                      caller: callerAtStart,
+                      responseHeadersReceived: receivedResponseHeaders,
+                      recentSuccessfulSameRequest: recentSuccessfulFetches.get(requestComparisonKey),
+                      advice: routeAdvice,
+                  });
+                  const logId = log.id;
+                  setSystemLogs(prev => [log, ...prev.slice(0, 49)]);
 
                   // 复检走 originalFetch，否则它自己失败会再写一条日志滚雪球。
-                  if (shouldProbeReachability(classifyFetchFailure({ url: urlStr, error: err }))) {
+                  if (shouldProbeReachability(kind)) {
                       void (async () => {
                           const verdict = await probeOriginReachability(urlStr, originalFetch);
                           const line = describeReachabilityProbe(verdict, parseTargetUrl(urlStr).host, method);
-                          if (!line) return;
-                          setSystemLogs(prev => prev.map(log => (
-                              log.id === logId ? { ...log, detail: `${log.detail || ''}\n${line}` } : log
+                          setSystemLogs(prev => prev.map(item => (
+                              item.id === logId
+                                  ? {
+                                      ...item,
+                                      context: item.context ? { ...item.context, reachability: verdict } : item.context,
+                                      detail: line ? `${item.detail || ''}\n${line}` : item.detail,
+                                  }
+                                  : item
                           )));
                       })();
                   }
@@ -1938,42 +2002,24 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               .filter(Boolean)
               .join('\n');
           // 对象参数也尝试 JSON.stringify 进 detail，方便排查原生异常结构
-          const objDump = args
-              .filter(a => typeof a === 'object' && a !== null && !(a instanceof Error))
-              .map(a => { try { return JSON.stringify(a); } catch { return ''; } })
-              .filter(Boolean)
-              .join('\n');
-          if (msg.includes('Warning:')) return;
-          setSystemLogs(prev => [{
-              id: `log-${Date.now()}-${Math.random()}`,
-              timestamp: Date.now(),
-              type: 'error',
-              source: 'Application',
-              message: msg.substring(0, 100),
-              detail: stacks || objDump || msg
-          }, ...prev.slice(0, 49)]);
+          const caller = captureCallerHint();
+          const ambient = getApiCallAmbientContext();
+          const errLog = buildConsoleErrorSystemLog({
+              report: args[0] instanceof ApplicationErrorReport ? args[0] : undefined,
+              message: msg,
+              stacks,
+              caller,
+              ambientMeta: ambient,
+          });
+          setSystemLogs(prev => [errLog, ...prev.slice(0, 49)]);
       };
-
-      // ── warn 捕获：只抓"自动化子系统"标签的 warn，进用户可见日志面板 ──
-      // 背景：记忆宫殿/主动消息等自动化子系统静默 skip 时只打 console.log/warn，
-      // APK 用户没法 logcat，出问题（如"自动没处理 260 条对话"）完全无从排查。
-      // 全量 warn 太噪（React/Capacitor 库 warn 一堆），只抓业务标签的：
-      //   [Pipeline] 记忆宫殿、[Proactive 主动消息、[Embedding]、[Vector]、[EventBox]、[Digestion]
-      // 这些 warn 已经走 originalConsoleWarn，这里只是额外镜像进面板。
       const originalConsoleWarn = console.warn;
-      const AUTO_SUBSYS_TAG_RE = /\[(Pipeline|Proactive|Embedding|Vector|EventBox|Digestion|Consolidation|Palace)/;
       console.warn = (...args) => {
           originalConsoleWarn(...args);
-          const msg = args.map(toStringSafe).join(' ');
-          if (!AUTO_SUBSYS_TAG_RE.test(msg)) return;
-          setSystemLogs(prev => [{
-              id: `log-${Date.now()}-${Math.random()}`,
-              timestamp: Date.now(),
-              type: 'warn',
-              source: 'Automation',
-              message: msg.substring(0, 100),
-              detail: msg
-          }, ...prev.slice(0, 49)]);
+          const message = args.map(toStringSafe).join(' ');
+          if (!/\[(Pipeline|Proactive|Embedding|Vector|EventBox|Digestion|Consolidation|Palace)/.test(message)) return;
+          const entry = buildConsoleErrorSystemLog({ message });
+          setSystemLogs(prev => [{ ...entry, type: 'warn', source: 'Automation' }, ...prev.slice(0, 49)]);
       };
   }, []);
 
@@ -2069,7 +2115,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                 if (parsed?.xhsMcpConfig?.serverUrl) {
                     parsed.xhsMcpConfig.serverUrl = rewriteStaleWorkerUrl(parsed.xhsMcpConfig.serverUrl);
                 }
-                setRealtimeConfig({ ...defaultRealtimeConfig, ...parsed });
+                const migrated = migrateFreeWeatherPreference(parsed);
+                const config = { ...defaultRealtimeConfig, ...migrated };
+                setRealtimeConfig(config);
+                if (migrated !== parsed) {
+                    localStorage.setItem('os_realtime_config', JSON.stringify(migrated));
+                    if (!parsed.weatherApiKey?.trim() && parsed.weatherFreeSource !== 'wttr') syncAmsgToolConfig(config);
+                }
             } catch (e) {
                 console.error('Failed to load realtime config', e);
             }
@@ -2218,6 +2270,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         // 导致「主题回初始 / 盲盒收藏册清空 / API 配置丢失」三连。必须在 loadSettings
         // 读 localStorage 之前完成回填。见 utils/lsMirror.ts。
         const healedKeys = await initLocalStorageMirror().catch(() => [] as string[]);
+        void recoverSignalOwnership();
         const hadPriorFeedbackEvidence = hasPriorFeedbackInstallEvidence();
         if (healedKeys.length > 0) {
             console.warn('[lsMirror] localStorage 疑似被清除，已从 IndexedDB 镜像回填:', healedKeys);
@@ -2229,6 +2282,19 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
         // 清掉 Instant Push 留在本机的旧配置和缓存（含 Worker 令牌、API Key 副本），只跑一次。
         void cleanupInstantPushLegacyData();
+        // 上次导出、下载中途崩溃留下的临时文件会一直占着配额，没被锁住的都删掉。
+        void import('../utils/backupTempFile').then(mod => mod.cleanupBackupTempFiles()).catch(() => {});
+        // 上次多空间导出闪退或被系统杀掉时留下的进度留痕：记进系统调试终端给用户复制，读完即删。
+        const exportTrace = consumeExportTrace();
+        if (exportTrace) {
+            const ts = Date.now();
+            setSystemLogs(prev => [{
+                id: `log-${ts}-export-trace`, timestamp: ts, time: formatDiagnosticTimestamp(ts), type: 'system', source: '备份导出',
+                message: exportTrace.title, detail: exportTrace.detail, context: { build: readCompactBuildString(), category: 'backup' },
+                advice: { title: exportTrace.title, action: '可能是导出途中页面被系统关掉了。请把下方技术详情里的这条日志复制发给开发者，再导出一次前建议先刷新页面。' },
+            }, ...prev.slice(0, 49)]);
+            setTimeout(() => addToast('上次备份导出没有完成，诊断信息已记入系统调试终端，可以复制发给开发者', 'info'), 2500);
+        }
 
         await loadSettings();
 
@@ -2425,7 +2491,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
         try {
             const rvConfig = JSON.parse(localStorage.getItem('os_remote_vector_config') || '{}');
             if (rvConfig.enabled && rvConfig.initialized && rvConfig.supabaseUrl) {
-                const { getVectorCount } = await import('../utils/memoryPalace/supabaseVector');
+                const { getVectorCount, readUpgrade } = await import('../utils/memoryPalace/supabaseVector');
+                if (!readUpgrade(rvConfig).done) return; // The automatic check already reports migration progress.
                 const remoteCount = await getVectorCount(rvConfig);
                 // 本地向量数量
                 const localDb = await import('../utils/db').then(m => m.openDB());
@@ -2435,7 +2502,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                     req.onsuccess = () => res(req.result);
                     req.onerror = () => res(0);
                 });
-                if (localCount > 0 && remoteCount < localCount * 0.5) {
+                if (localCount > 0 && remoteCount === null) {
+                    setTimeout(() => addToast('远程向量数量暂时无法查询，可在记忆宫殿设置中测试连接。', 'info'), 3000);
+                } else if (remoteCount !== null && remoteCount < localCount) {
                     setTimeout(() => addToast(`本地有 ${localCount} 条向量，远程仅 ${remoteCount} 条。建议去设置页同步到远程。`, 'info'), 3000);
                 }
             }
@@ -2486,14 +2555,33 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   useEffect(() => {
       if (!isDataLoaded || characters.length === 0) return;
       let cancelled = false;
+      let timer: ReturnType<typeof setTimeout>;
+      let refreshRequested = false;
+      // Bulk imports and other tabs can write directly to IndexedDB. Normal saves wake us immediately.
+      const idleInterval = isNativeRuntimePlatform() ? 60_000 : 5000;
+      const scheduleCheck = (delay: number) => {
+          clearTimeout(timer);
+          if (!cancelled) timer = setTimeout(checkAllSchedules, Math.max(0, delay));
+      };
       const checkAllSchedules = async () => {
-          if (cancelled || scheduledDeliveryInFlightRef.current) return;
+          if (cancelled) return;
+          if (scheduledDeliveryInFlightRef.current) {
+              scheduleCheck(250);
+              return;
+          }
           scheduledDeliveryInFlightRef.current = true;
+          refreshRequested = false;
+          let nextCheckAt = Date.now() + 5000;
           try {
+          const { dueCharacters, nextDueAt } = await DB.getScheduledDeliveryPlan();
+          if (cancelled) return;
+          nextCheckAt = Math.min(nextDueAt, Date.now() + (dueCharacters.size ? 5000 : idleInterval));
+          if (!dueCharacters.size) return;
           let hasNewMessage = false;
           const unreadUpdates: Record<string, number> = {};
 
           for (const char of characters) {
+              if (!dueCharacters.has(char.id)) continue;
               try {
                   // 用户正在 DateApp 里和这个角色见面 —— 角色之前排好的定时消息
                   // ([schedule_message] 指令) 这轮先压着不投递（不删不读），
@@ -2517,7 +2605,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       if (cancelled) return;
                       hasNewMessage = true;
                       // Use refs for latest state (avoids stale closure & unnecessary deps)
-                      const isChattingWithThisChar = activeAppRef.current === AppID.Chat && activeCharIdScheduleRef.current === char.id;
+                      const isChattingWithThisChar = !document.hidden && activeAppRef.current === AppID.Chat && activeCharIdScheduleRef.current === char.id;
 
                       // If not chatting specifically with this char right now, mark as unread
                       if (!isChattingWithThisChar) {
@@ -2563,13 +2651,24 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   return next;
               });
           }
+          } catch (error) {
+              console.warn('[ScheduledMessages] queue read failed', error);
           } finally {
               scheduledDeliveryInFlightRef.current = false;
+              scheduleCheck(refreshRequested ? 0 : nextCheckAt - Date.now());
           }
       };
-      schedulerRef.current = setInterval(checkAllSchedules, 5000);
+      const wake = () => { refreshRequested = true; scheduleCheck(0); };
+      const onVisible = () => { if (!document.hidden) wake(); };
+      window.addEventListener('sully-scheduled-message-saved', wake);
+      document.addEventListener('visibilitychange', onVisible);
       checkAllSchedules();
-      return () => { cancelled = true; if (schedulerRef.current) clearInterval(schedulerRef.current); };
+      return () => {
+          cancelled = true;
+          clearTimeout(timer);
+          window.removeEventListener('sully-scheduled-message-saved', wake);
+          document.removeEventListener('visibilitychange', onVisible);
+      };
   }, [isDataLoaded, characters]);
 
   const clearUnread = useCallback((charId: string) => {
@@ -2598,10 +2697,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       };
 
       const handler = (e: Event) => {
-          const { charId, charName, body, roundKey } = (e as CustomEvent).detail as { charId: string; charName: string; body?: string; roundKey?: string };
+          const { charId, charName, body, roundKey, nativeNotificationHandled } = (e as CustomEvent).detail as { charId: string; charName: string; body?: string; roundKey?: string; nativeNotificationHandled?: boolean };
           setLastMsgTimestamp(Date.now());
 
-          const isChattingWithThisChar = (activeAppRef.current === AppID.Chat && activeCharIdScheduleRef.current === charId) || isEmbeddedChatVisible(charId);
+          const isChattingWithThisChar = !document.hidden && ((activeAppRef.current === AppID.Chat && activeCharIdScheduleRef.current === charId) || isEmbeddedChatVisible(charId));
           if (!isChattingWithThisChar) {
               const isVisible = document.visibilityState === 'visible';
               const repeatRound = isRepeatRound(charId, roundKey);
@@ -2612,7 +2711,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
               setUnreadMessages(prev => ({ ...prev, [charId]: (prev[charId] || 0) + 1 }));
               const preview = (body || `${charName} sent an active message`).replace(/\s+/g, ' ').trim() || `${charName} sent an active message`;
-              void sendProactiveNativeNotification(charId, charName, preview);
+              if (!nativeNotificationHandled && !repeatRound) void sendProactiveNativeNotification(charId, charName, preview);
               // SW push handler 已经 fire 过系统通知（不在前台时露出真实内容、在前台时
               // silent + close 静默），这里不再补一次，避免重复弹窗。
           }
@@ -2708,14 +2807,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       //   - replyEnd（finally，含失败路径）→ 只 bump 时间戳，把 catch 里落库的
       //     错误系统消息也刷出来。
       const chatReplyArrivedHandler = (e: Event) => {
-          const { charId, charName } = ((e as CustomEvent).detail || {}) as { charId?: string; charName?: string };
+          const { charId, charName, nativeNotificationHandled } = ((e as CustomEvent).detail || {}) as Partial<ChatGenDetail>;
           if (!charId) return;
           setLastMsgTimestamp(Date.now());
-          const isChattingWithThisChar = (activeAppRef.current === AppID.Chat && activeCharIdScheduleRef.current === charId) || isEmbeddedChatVisible(charId);
+          const isChattingWithThisChar = !document.hidden && ((activeAppRef.current === AppID.Chat && activeCharIdScheduleRef.current === charId) || isEmbeddedChatVisible(charId));
           if (!isChattingWithThisChar) {
               setUnreadMessages(prev => ({ ...prev, [charId]: (prev[charId] || 0) + 1 }));
               if (document.visibilityState === 'visible') {
                   addToast(`${charName || '角色'} 回复了消息`, 'success');
+              } else if (!nativeNotificationHandled) {
+                  void sendProactiveNativeNotification(charId, charName || '角色', '回复已收到，点此查看');
               }
           }
       };
@@ -2786,10 +2887,21 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
       window.addEventListener('amsg-tool-config-conflict', toolConfigConflictHandler);
       window.addEventListener('active-msg-received', handler);
+      window.addEventListener('proactive-message-sent', handler);
       window.addEventListener('active-msg-process-failed', inboxFailHandler);
       window.addEventListener('active-msg-backfill-stale', backfillStaleHandler);
       window.addEventListener('active-msg-progress', progressHandler);
       window.addEventListener('active-msg-open', openHandler);
+      // Dynamic import keeps the native-only handoff off the regular web startup path.
+      let disposeNativeOpen: (() => void) | undefined;
+      let nativeOpenCancelled = false;
+      if (import.meta.env.VITE_AMSG_NATIVE_PUSH === 'true' || isNativeRuntimePlatform()) {
+          void import('../utils/nativeNotificationNavigation').then(({ subscribeNativeNotificationOpen }) => {
+              if (!nativeOpenCancelled) disposeNativeOpen = subscribeNativeNotificationOpen(charId => {
+                  void openHandler(new CustomEvent('active-msg-open', { detail: { charId } }));
+              });
+          });
+      }
       const secretSyncHandler = (event: Event) => {
           const charId = (event as CustomEvent).detail?.charId;
           const char = charactersRef.current.find(c => c.id === charId);
@@ -2805,11 +2917,14 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       document.addEventListener('visibilitychange', onVisible);
       return () => {
           window.removeEventListener('active-msg-received', handler);
+          window.removeEventListener('proactive-message-sent', handler);
           window.removeEventListener('active-msg-process-failed', inboxFailHandler);
           window.removeEventListener('amsg-tool-config-conflict', toolConfigConflictHandler);
           window.removeEventListener('active-msg-backfill-stale', backfillStaleHandler);
           window.removeEventListener('active-msg-progress', progressHandler);
           window.removeEventListener('active-msg-open', openHandler);
+          nativeOpenCancelled = true;
+          disposeNativeOpen?.();
           window.removeEventListener(HOME_SECRETS_UPDATED, secretSyncHandler);
           window.removeEventListener('friend-feed-history-updated', secretSyncHandler);
           window.removeEventListener('emotion-updated', buffSyncHandler);
@@ -3574,25 +3689,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       };
       window.addEventListener('world-reroll-request', onRerollRequest as EventListener);
 
-      // Native timer wakeups: when durable native timers fire (after WebView was killed),
-      // they dispatch proactive-native-wake / vr-native-wake / world-native-wake.
-      // Here we bridge them to the existing runProactive/runVR/runWorld callbacks.
-      const onProactiveNativeWake = (e: Event) => {
-        const charId = (e as CustomEvent).detail?.charId;
-        if (charId) void runProactive(charId);
-      };
-      const onVrNativeWake = (e: Event) => {
-        const charId = (e as CustomEvent).detail?.charId;
-        if (charId) void runVR(charId);
-      };
-      const onWorldNativeWake = (e: Event) => {
-        const worldId = (e as CustomEvent).detail?.worldId;
-        if (worldId) void runWorld(worldId, 'tick');
-      };
-      window.addEventListener('proactive-native-wake', onProactiveNativeWake as EventListener);
-      window.addEventListener('vr-native-wake', onVrNativeWake as EventListener);
-      window.addEventListener('world-native-wake', onWorldNativeWake as EventListener);
-
       // 调度表存 localStorage 不随备份迁移，按 IndexedDB 里的世界配置对账
       void DB.getWorlds()
           .then(async worlds => {
@@ -3609,9 +3705,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           VRScheduler.onTrigger(() => {});
           WorldScheduler.onTrigger(() => {});
           window.removeEventListener('world-reroll-request', onRerollRequest as EventListener);
-          window.removeEventListener('proactive-native-wake', onProactiveNativeWake as EventListener);
-          window.removeEventListener('vr-native-wake', onVrNativeWake as EventListener);
-          window.removeEventListener('world-native-wake', onWorldNativeWake as EventListener);
       };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDataLoaded]);
@@ -3851,6 +3944,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   }, [isDataLoaded]);
 
   const updateTheme = async (updates: Partial<OSTheme>) => {
+    updates = decorationSelection(theme, updates, 'global');
     stopBeautyForThemeChange(updates);
     const { wallpaper, lockWallpaper, launcherWidgetImage, launcherWidgets, desktopDecorations, customFont, ...styleUpdates } = updates;
     // Legacy slots are banned — never let them enter state, regardless of caller intent.
@@ -3998,7 +4092,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       const { uploadBackup, cleanupOldBackups } = await loadBackupProvider();
       try {
           setSysOperation({ status: 'processing', message: '正在打包备份数据...', progress: 0 });
-          const blob = await exportSystem(mode, { userScope: 'all' });
+          // 个人云备份用于换机恢复，必须保留原后台身份和密钥。不能被文件分享的脱敏偏好剥掉。
+          const blob = await exportSystem(mode, { userScope: 'all', includeBackendConnection: true });
 
           setSysOperation({ status: 'processing', message: '正在上传到云端...', progress: 50 });
           const filename = `Sully_Backup_${mode}_${formatBackupTimestamp()}.zip`;
@@ -4009,6 +4104,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (!result.ok) {
               throw new Error(result.message);
           }
+          markBackupDone();
 
           // Update last backup time
           updateCloudBackupConfig({ lastBackupTime: Date.now(), lastBackupSize: blob.size });
@@ -4060,25 +4156,32 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       return () => { window.clearTimeout(t0); window.clearInterval(t); };
   }, []);
 
-  const cloudRestoreFromWebDAV = async (file: CloudBackupFile, importOptions?: ImportSystemOptions) => {
+  const cloudRestoreFromWebDAV = (file: CloudBackupFile, importOptions?: ImportSystemOptions) => withScreenAwake(async () => {
       const { downloadBackup } = await loadBackupProvider();
       try {
           setSysOperation({ status: 'processing', message: '正在从云端下载...', progress: 0 });
-          const blob = await downloadBackup(cloudBackupConfig, file, (pct) => {
+          const backup = await downloadBackup(cloudBackupConfig, file, (pct) => {
               setSysOperation(prev => ({ ...prev, message: `下载中 ${pct}%...`, progress: pct * 0.5 }));
           });
 
-          if (!blob) throw new Error('下载失败');
+          if (!backup) throw new Error('下载失败');
 
-          setSysOperation({ status: 'processing', message: '正在恢复数据...', progress: 50 });
-          const zipFile = new File([blob], file.name, { type: 'application/zip' });
-          await importSystem(zipFile, importOptions);
+          try {
+              setSysOperation({ status: 'processing', message: '正在恢复数据...', progress: 50 });
+              // 下载落盘时 blob 就是临时文件本身，直接交给按需读包；只有内存降级时才需要包成 File。
+              const zipFile = backup.blob instanceof File
+                  ? backup.blob
+                  : new File([backup.blob], file.name, { type: 'application/zip' });
+              await importSystem(zipFile, importOptions);
+          } finally {
+              await backup.dispose();
+          }
       } catch (e: any) {
           setSysOperation({ status: 'idle', message: '', progress: 0 });
           addToast(`云端恢复失败: ${e.message}`, 'error');
           throw e;
       }
-  };
+  });
 
   const listCloudBackups = async (): Promise<CloudBackupFile[]> => {
       const { listBackups } = await loadBackupProvider();
@@ -4096,6 +4199,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     });
     setMemoryPalaceConfig(newConfig);
     localStorage.setItem('os_memory_palace_config', JSON.stringify(newConfig));
+    // 主动消息模板也包含智能语境；切换后刷新已有任务，不能等下次聊天才生效。
+    const smartFlags = ['recallRouter', 'interactionAdaptation', 'deepEngagement'] as const;
+    if (smartFlags.some(key => !!memoryPalaceConfig.featureFlags?.[key] !== !!newConfig.featureFlags?.[key])) {
+      markAmsgStateDirtyForAll({ characters, userProfile, groups, realtimeConfig });
+    }
   };
 
   // 情绪 API 同步到所有角色：API 字段（baseUrl/apiKey/model）所有角色共用，
@@ -4159,7 +4267,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const updateCharacter = async (id: string, updates: Partial<CharacterProfile> | ((prev: CharacterProfile) => Partial<CharacterProfile>)) => {
     if (typeof updates !== 'function' && Object.keys(updates).some(key => ['chatAppearance','chatFineTune','bubbleStyle','chatBackground','chromeCustomCss','chatSound','chatSoundBound','chatDecorationCssIsolated'].includes(key))) stopBeautyUsage('chat:' + id);
     setCharacters(prev => {
-      const updated = prev.map(c => c.id === id ? normalizeCharacterImpression({ ...c, ...(typeof updates === 'function' ? updates(c) : updates) }) : c);
+      const updated = prev.map(c => c.id === id ? normalizeCharacterImpression({ ...c, ...decorationSelection(c, typeof updates === 'function' ? updates(c) : updates, 'character') }) : c);
       const target = updated.find(c => c.id === id);
       if (target) {
         const before = prev.find(c => c.id === id);
@@ -4492,8 +4600,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       else await DB.deleteAsset(`icon_${appId}`);
   };
   const addToast = (message: string, type: Toast['type'] = 'info') => { const id = Date.now().toString(); setToasts(prev => [...prev, { id, message, type }]); setTimeout(() => { setToasts(prev => prev.filter(t => t.id !== id)); }, 3000); };
-  const showError = (title: string, details: string) => {
-      setErrorDialog({ title, details });
+  const showError = (title: string, details: string, endpoint?: {baseUrl:string; model:string}) => {
+      const status = Number(details.match(/(?:API Error|HTTP)\s+(\d{3})/i)?.[1]);
+      const route = endpoint && requestErrorAdvice(errorRoutes.current, endpoint.baseUrl, '', status || 0, details, endpoint.model);
+      setErrorDialog({ title, details, advice: textErrorAdvice(title, details) ?? route });
+
       // showError 是分发型入口，title 由调用方传。这里写显式白名单：
       // 只有下面这两个写死的 title 会上报，其它（含以后新加的）一律不发，
       // 也绝不把 title 原样透传出去（免得哪天有人往里塞 URL 或报错原文）。
@@ -4757,9 +4868,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const importAppearancePreset = async (file: File): Promise<string> => {
       // 兼容两种格式：新版 .zip（内含 preset.json）/ 旧版 .json 明文
       let raw: any;
-      const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
-      const isZip = head[0] === 0x50 && head[1] === 0x4b && (head[2] === 0x03 || head[2] === 0x05 || head[2] === 0x07);
-      if (isZip) {
+      if (await isZipFile(file)) {
           const JSZip = await loadJSZip();
           const zip = await JSZip.loadAsync(file);
           const entry = zip.file('preset.json') || Object.values((zip as any).files || {}).find((f: any) => !f.dir && /\.json$/i.test(f.name));
@@ -4795,17 +4904,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   ): Promise<Blob> => {
       try {
           setSysOperation({ status: 'processing', message: '正在初始化打包引擎...', progress: 0 });
-          // 手动导出和云端备份都从这里过，带哪些东西只在这一处按备份偏好决定。
-          const { includeBackendConnection } = readBackupPreferences();
+          // 文件导出由用户选择是否带连接；个人云备份显式要求完整恢复配置。
+          const includeBackendConnection = exportOptions.includeBackendConnection ?? readBackupPreferences().includeBackendConnection;
 
           if (listUserSpaces().length > 1) {
               const { exportUserSpaces } = await import('../utils/userSpaceBackup');
-              const result = await exportUserSpaces(mode, exportOptions.userScope || 'current', message => setSysOperation({ status: 'processing', message, progress: 30 }), includeBackendConnection, items => {
+              const result = await withScreenAwake(() => exportUserSpaces(mode, exportOptions.userScope || 'current', message => setSysOperation({ status: 'processing', message, progress: 30 }), includeBackendConnection, items => {
                   exportOptions.onMissingAssets?.(items);
                   if (items.length) addToast(missingBackupAssetsSummary(items), 'info');
-              });
+              }));
               setSysOperation({ status: 'idle', message: '', progress: 0 });
-              markBackupDone();
               return result;
           }
           const zip = createBackupArchive();
@@ -4945,7 +5053,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               'user_profile', 'diaries', 'tasks', 'tasks_v2', 'anniversaries', 'room_todos',
               'room_notes', 'groups', 'journal_stickers', 'social_posts', 'courses', 'games', 'worldbooks', 'story_theaters', 'story_theater_presets', 'story_theater_masks', 'novels', 'songs',
               'bank_transactions', 'bank_data',
-              'xhs_activities', 'xhs_stock',
+              'xhs_activities', 'xhs_owned_posts', 'xhs_stock',
               'quizzes', 'guidebook', 'scheduled_messages', 'life_sim',
               'handbook', 'trackers', 'tracker_entries', 'hotnews_snapshots',
               'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
@@ -4999,6 +5107,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const backupData: Partial<FullBackupData> = {
               friendFeed: mode === 'text_only' ? stripBackupImages(await readFriendFeed()) : undefined,
               friendFeedMedia: mode === 'media_only' ? collectFriendFeedMedia(await readFriendFeed()) : undefined,
+              helpDeskHistory: mode === 'text_only' ? helpTextHistory(await DB.getAssetRaw(HELP_HISTORY_KEY) ?? []) : undefined,
               contentFavoritesIndex: mode === 'text_only'
                   ? stripBackupImages(await DB.getAssetRaw('content_favorites_index_v1')) : undefined,
               timestamp: Date.now(),
@@ -5184,6 +5293,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // 纯配置无媒体，跟着 text_only / full 走。
           if (mode === 'text_only' || mode === 'full') {
               backupData.amsg2GlobalConfig = await exportAmsg2GlobalConfig({ includeBackendConnection });
+              backupData.chatSubtitleByChar = exportSubtitleSettings();
           }
 
           // 桌面皮肤偏好（电子宠物/手游风的界面配色 + 看板 banner）——异步（看板图令牌需解析为
@@ -5295,6 +5405,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
               'room_plates', 'digest_reports',
               'bank_transactions', 'scheduled_messages', 'memory_batches', 'hotnews_snapshots',
+              'xhs_owned_posts',
               'character_groups',
               'story_theaters', 'story_theater_presets',
               'life_records', 'med_plans', 'life_record_settings'
@@ -5330,6 +5441,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               songs: 'songs',
               bank_transactions: 'bankTransactions',
               xhs_activities: 'xhsActivities',
+              xhs_owned_posts: 'xhsOwnedPosts',
               xhs_stock: 'xhsStockImages',
               quizzes: 'quizSessions',
               guidebook: 'guidebookSessions',
@@ -5373,9 +5485,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               job_notes: 'jobNotes',
               job_resumes: 'jobResumes',
               job_profile: 'jobProfiles',
-              xhs_owned_posts: 'xhsOwnedPosts',
           };
           const prewrittenStores: BackupManifest['stores'] = {};
+          const stickerLinks = legacyStickerLinks(await DB.getEmojis());
           // Vectors retain the existing binary format, read one record at a time.
           let vectorPayload: Awaited<ReturnType<typeof encodeVectorsForBackupChunked>> | undefined;
           // Only voice Blobs reachable from the exported Live2D settings are portable.
@@ -5405,6 +5517,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   prewrittenStores[field] = await streamBackupArrayStore(zip, storeName, field, {
                       onSerialized: collectSerialized,
                       transform: (item, index) => {
+                          item = portableEmojiRow(storeName, item, stickerLinks);
                           if (storeName === 'characters') {
                               normalizeCharacterRoomAssetsInPlace(item);
                               if (mode !== 'text_only') {
@@ -5415,6 +5528,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                           if (storeName === 'assets') {
                               const id = item?.id;
                               if (mode === 'text_only') return exportActivityTextAsset(item);
+                              if (mode === 'media_only' && id === HELP_HISTORY_KEY) return { id, data: helpMediaHistory(item.data) };
                               if (mode === 'media_only' && typeof id === 'string' && isActivityTextAsset(id)) return undefined;
                               if (typeof id === 'string' && (
                                   isRedundantManagedAssetId(id)
@@ -5574,8 +5688,6 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           );
 
           setSysOperation({ status: 'idle', message: '', progress: 100 });
-          // 备份成功 → 推进「该备份啦」提醒的计时（本地导出 / 云备份都走这里，一处覆盖两条路径）
-          markBackupDone();
           exportOptions.onMissingAssets?.(missingAssets);
           if (missingAssets.length) addToast(missingBackupAssetsSummary(missingAssets), 'info');
           if (malformedImageCount > 0) {
@@ -5593,10 +5705,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       }
   };
 
-  const importSystem = async (
+  const importSystem = (
       fileOrJson: File | string,
       importOptions: ImportSystemOptions = {},
-  ): Promise<void> => {
+  ): Promise<void> => withScreenAwake(async () => {
       const sourceName = typeof fileOrJson === 'string' ? 'json' : fileOrJson.name;
       const sourceSize = typeof fileOrJson === 'string'
           ? (typeof Blob !== 'undefined' ? new Blob([fileOrJson]).size : fileOrJson.length)
@@ -5607,6 +5719,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
       let lastCurrent = '解析备份文件';
       let lastCurrentFile: string | undefined;
       let lastCurrentFileSize: number | undefined;
+      const importMarker = createImportProgressMarker(sourceName);
 
       const buildImportMessage = (headline: string, update: ImportProgressUpdate = {}) => {
           const lines = [headline];
@@ -5638,7 +5751,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (update.currentFile !== undefined) lastCurrentFile = update.currentFile;
           if (update.currentFileSize !== undefined) lastCurrentFileSize = update.currentFileSize;
           lastProgress = Math.max(lastProgress, Math.min(99, Math.max(0, progress)));
-          markImportInProgress(phase, sourceName, {
+          importMarker.update(phase, {
               sourceSize,
               assetDone: restoredAssetFiles.size,
               assetTotal: totalAssetFiles || undefined,
@@ -5651,79 +5764,97 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           });
       };
 
-      const countZipAssetFiles = (zip: JSZipLike) => {
-          const files = Object.values((zip as any).files || {}) as any[];
-          return files.filter(file => file && !file.dir && typeof file.name === 'string' && file.name.startsWith('assets/')).length;
+      // 包里个别图片坏了（CRC 不符、解压失败）按缺图跳过，恢复照常完成。清单在刷新前存到本机，重启后弹一次提示：
+      // 不能停在这里等用户点确认，页面还带着恢复前的内存状态，后台写入会把旧状态写进刚恢复的库。
+      const damagedAssets: BackupMissingAsset[] = [];
+      const noteDamagedAsset = (id: string) => {
+          if (!damagedAssets.some(item => item.id === id)) damagedAssets.push({ id, locations: [], reason: 'damaged' });
+      };
+      const reportDamagedAssets = () => {
+          if (!damagedAssets.length) return;
+          console.warn('[backup] 备份包里已损坏、恢复时跳过的素材:', damagedAssets.map(item => item.id));
+          saveRestoreDamagedAssets(damagedAssets);
       };
 
-      const estimateBase64Bytes = (base64: string) => {
-          const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
-          return Math.max(0, Math.floor(base64.length * 3 / 4) - padding);
+      // 两条用户空间路径共用：写库前一刻才记标记；迁入为新用户失败时新空间已删干净，本机数据原样，标记随之清掉。
+      const userSpaceWriteHooks = {
+          onBeforeWrite: () => {
+              importMarker.beginWrite();
+              showImportProgress('database', '正在写入用户空间...', 50, { current: '写入用户空间' });
+          },
+          onRolledBack: () => importMarker.clear(),
+          onDamagedAsset: (id: string) => noteDamagedAsset(id),
+          // 检查阶段也会回调；importMarker.update 在 beginWrite 之前什么都不写，所以不会提前留下「导入中」标记。
+          onProgress: (p: import('../utils/userSpaceBackup').UserSpaceRestoreProgress) => {
+              showImportProgress('database', `${p.stage}...`, Math.round(2 + p.ratio * 96), { current: p.current ?? '', itemDone: p.done, itemTotal: p.total });
+          },
       };
+
+      const countZipAssetFiles = (zip: BackupZipReader) => (
+          Object.values(zip.files).filter(file => !file.dir && file.name.startsWith('assets/')).length
+      );
 
       showImportProgress('parsing', '正在解析备份文件...', 1, { current: '解析备份文件', sourceSize });
+      let zip: BackupZipReader | null = null;
       try {
           let data: FullBackupData;
-          let zip: JSZipLike | null = null;
 
           if (typeof fileOrJson === 'string') {
               data = JSON.parse(fileOrJson);
           } else {
-              if (!fileOrJson.name.endsWith('.zip')) {
+              // 按文件头判断格式，不看文件名：云端下载落盘的临时文件名不带 .zip。
+              if (await detectBackupFileKind(fileOrJson) === 'json') {
+                  const text = await fileOrJson.text(); // 读取放在 try 外面：读文件失败原样抛出，不说成格式无效
                   try {
-                      const text = await fileOrJson.text();
                       data = JSON.parse(text);
                   } catch (e) {
                       throw new Error("无效的文件格式，请上传 .zip 或 .json");
                   }
               } else {
-                  const JSZip = await loadJSZip();
-                  const loadedZip = await JSZip.loadAsync(fileOrJson);
+                  // 只读包尾的目录，条目用到才按字节范围读；动态加载，zip.js 不进主包。
+                  const { openBackupZip } = await import('../utils/backupZipReader');
+                  const loadedZip = zip = await openBackupZip(fileOrJson);
                   if (loadedZip.file('user-spaces.json')) {
                       const { importUserSpaces } = await import('../utils/userSpaceBackup');
                       const spaceManifest = JSON.parse(await loadedZip.file('user-spaces.json')!.async('string'));
                       const allowBackend = !importOptions.asNewUsers && backupHasBackendConnection(spaceManifest.backend) && importOptions.confirmBackendRestore
                           ? await importOptions.confirmBackendRestore(String(spaceManifest.backend.workerUrl).trim()) : false;
-                      const imported = await importUserSpaces(loadedZip, allowBackend, { asNewUsers: importOptions.asNewUsers });
+                      const imported = await importUserSpaces(loadedZip, allowBackend, { ...userSpaceWriteHooks, asNewUsers: importOptions.asNewUsers });
                       if (importOptions.asNewUsers) selectUserSpace(imported[0].id);
-                      clearImportInProgress();
+                      importMarker.clear();
                       setSysOperation({ status: 'idle', message: '', progress: 0 });
+                      reportDamagedAssets();
                       window.location.reload();
                       return;
                   }
-                  zip = loadedZip;
                   totalAssetFiles = countZipAssetFiles(loadedZip);
-                  const manifestFile = loadedZip.file("manifest.json");
-                  if (manifestFile) {
-                      // v2：manifest 驱动的分片备份。assembleV2Backup 只读 zip、组装内存对象，
-                      // 校验不过直接抛错——此时 importFullData 还没调，DB 一字未动。
-                      let manifest: BackupManifest;
-                      try {
-                          manifest = JSON.parse(await manifestFile.async("string"));
-                      } catch {
-                          throw new Error("损坏的备份包：manifest.json 解析失败");
-                      }
-                      data = await assembleV2Backup(
-                          loadedZip as unknown as ZipFileReader,
-                          manifest,
-                          {
-                              onYield: () => new Promise<void>(r => setTimeout(r, 0)),
-                              onShardProgress: (field, idx, total) => {
-                                  showImportProgress('parsing', '正在解析备份分片...',
-                                      5 + Math.floor((idx / Math.max(1, total)) * 25),
-                                      { current: `分片 ${field}` });
-                              },
-                          },
-                      ) as FullBackupData;
-                  } else {
-                      // v1（老备份）：单根 data.json，原样保留，老备份永远打得开。
-                      const dataFile = loadedZip.file("data.json");
-                      if (!dataFile) throw new Error("损坏的备份包: 缺少 data.json");
-                      let jsonStr = await dataFile.async("string");
-                      data = JSON.parse(jsonStr);
-                      jsonStr = '';
-                  }
+                  // 旧格式三代都从这里进：v2/v3 的分片字段先是占位、写库用到时才读，v1 的 data.json 整个读入。
+                  // 校验不过直接抛错——此时 importFullData 还没调，DB 一字未动。
+                  data = await openLegacyBackup(loadedZip, {
+                      onYield: () => new Promise<void>(r => setTimeout(r, 0)),
+                      onShardProgress: (field, idx, total) => {
+                          showImportProgress('parsing', '正在解析备份分片...',
+                              5 + Math.floor((idx / Math.max(1, total)) * 25),
+                              { current: `分片 ${field}` });
+                      },
+                      // 收藏语音的字节在 JSON 之外：assets 每次读出都把标记换回 Blob。
+                      // 校验阶段就会读一遍，缺文件或被截断在写库前中止。
+                      onFieldRead: async (field, rows) => {
+                          if (field === 'assets') {
+                              await restoreVoiceMessageBlobs(rows, async path => loadedZip.file(path)?.async('uint8array') ?? null);
+                          }
+                      },
+                  }) as FullBackupData;
               }
+          }
+
+          // 救援页导出的云端碎片（docs/amsg2-rescue.md）：先转成备份，再一律迁入为新用户。
+          // 不管点的是哪个导入按钮都不走覆盖恢复，救回来的东西比本机少，不能拿它盖掉现有数据。
+          if (isAmsgRescueExport(data)) {
+              const { backup, summary } = rescueExportToBackup(data);
+              trackEvent('导入救援文件', buildRescueImportAnalytics(summary));
+              data = backup;
+              importOptions = { ...importOptions, asNewUsers: true };
           }
 
           // 必须发生在 restoreAssetsInPlace / DB.importFullData 之前：不受支持的第三方
@@ -5732,10 +5863,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           if (importOptions.asNewUsers) {
               showImportProgress('database', '正在迁入独立用户...', 30, { current: '整理聊天、记忆与素材关联' });
               const { importLegacyAsIndependentUser } = await import('../utils/legacyIndependentUserImport');
-              const imported = await importLegacyAsIndependentUser(data, zip);
+              const imported = await importLegacyAsIndependentUser(data, zip, userSpaceWriteHooks);
               selectUserSpace(imported[0].id);
-              clearImportInProgress();
+              importMarker.clear();
               setSysOperation({ status: 'idle', message: '', progress: 0 });
+              reportDamagedAssets();
               window.location.reload();
               return;
           }
@@ -5751,12 +5883,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           // 缺项时会整包中止，不会出现主数据已恢复、协同文件只回来一半的状态。
           let collaborationAssetRecords: Array<{ id: string; blob: Blob; createdAt: number }> | undefined;
           if (data.collaborationAssetIndex !== undefined) {
+              const collaborationAssetIndex = await readBackupField(data.collaborationAssetIndex);
               collaborationAssetRecords = [];
-              if (data.collaborationAssetIndex.length > 0 && !zip) {
+              if (collaborationAssetIndex.length > 0 && !zip) {
                   throw new Error('损坏的备份包：协同文件缺少 ZIP 数据');
               }
-              for (let index = 0; index < data.collaborationAssetIndex.length; index++) {
-                  const item = data.collaborationAssetIndex[index];
+              for (let index = 0; index < collaborationAssetIndex.length; index++) {
+                  const item = collaborationAssetIndex[index];
                   if (!item?.id || !item.path?.startsWith('collaboration/assets/')) {
                       throw new Error('损坏的备份包：协同文件索引无效');
                   }
@@ -5777,127 +5910,11 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
           }
 
-          // v2 backups keep favorite voice bytes outside JSON. Rehydrate every marker
-          // before DB.importFullData starts, so a missing/truncated file aborts while
-          // the current database is still untouched.
-          if (zip && Array.isArray(data.assets)) {
-              await restoreVoiceMessageBlobs(data.assets, async path => {
-                  const entry = zip?.file(path);
-                  return entry ? entry.async('uint8array') : null;
-              });
-          }
-
           // v3 blob 旁路：令牌原样在 JSON 里，二进制在 blobs/*。readBlobsIndex 先把索引
           // 与文件齐全性验完（此时一个字节没写），再按原令牌 id 写回 blob_assets——令牌
           // 身份保住，JSON 引用零改写、零重编码。中途失败直接中止导入：主数据尚未写库，
           // 已写回的部分只是孤儿 blob，由手动 GC 收口。v2 老包没有索引文件，这里是 no-op。
-          if (zip) {
-              const blobEntries = await readBlobsIndex(zip as unknown as ZipFileReader);
-              if (blobEntries.length > 0) {
-                  await restoreBlobsFromZip(
-                      zip as unknown as ZipFileReader,
-                      blobEntries,
-                      restoreBlobRef,
-                      {
-                          onYield: () => new Promise<void>(r => setTimeout(r, 0)),
-                          onProgress: (done, total, id) => {
-                              showImportProgress('assets', '正在恢复图片二进制...',
-                                  30 + Math.floor((done / Math.max(1, total)) * 5),
-                                  { current: `图片二进制 ${done}/${total}`, currentFile: id });
-                          },
-                      },
-                  );
-              }
-          }
-
-          const hadAssetStoreBackup = data.assets !== undefined;
-          const hadCustomIconsBackup = data.customIcons !== undefined;
-          const hadAppearancePresetsBackup = data.appearancePresets !== undefined;
-
-          const restoreAssetsInPlace = async (root: any, label = '数据'): Promise<void> => {
-              if (!zip) return;
-
-              type Ref = { parent: any; key: string | number; filename: string };
-              const refsByFile = new Map<string, Ref[]>();
-              const seen = new WeakSet<object>();
-              const stack: any[] = [root];
-              while (stack.length) {
-                  const node = stack.pop();
-                  if (node === null || typeof node !== 'object') continue;
-                  if (seen.has(node)) continue;
-                  seen.add(node);
-                  if (Array.isArray(node)) {
-                      for (let i = 0; i < node.length; i++) {
-                          const v = node[i];
-                          if (typeof v === 'string' && v.startsWith('assets/')) {
-                              const filename = v.slice('assets/'.length);
-                              const refs = refsByFile.get(filename) || [];
-                              refs.push({ parent: node, key: i, filename });
-                              refsByFile.set(filename, refs);
-                          } else if (v && typeof v === 'object') {
-                              stack.push(v);
-                          }
-                      }
-                  } else {
-                      for (const k in node) {
-                          if (!Object.prototype.hasOwnProperty.call(node, k)) continue;
-                          const v = node[k];
-                          if (typeof v === 'string' && v.startsWith('assets/')) {
-                              const filename = v.slice('assets/'.length);
-                              const refs = refsByFile.get(filename) || [];
-                              refs.push({ parent: node, key: k, filename });
-                              refsByFile.set(filename, refs);
-                          } else if (v && typeof v === 'object') {
-                              stack.push(v);
-                          }
-                      }
-                  }
-              }
-
-              const entries = Array.from(refsByFile.entries());
-              if (entries.length === 0) return;
-
-              for (const [filename, refs] of entries) {
-                  const fileInZip = zip.file(`assets/${filename}`) as (JSZipFileLike & { _data?: { compressedSize?: number; uncompressedSize?: number } }) | null;
-                  const hintedSize = fileInZip?._data?.uncompressedSize || fileInZip?._data?.compressedSize;
-                  showImportProgress('assets', '正在恢复素材...', 35 + Math.floor((restoredAssetFiles.size / Math.max(1, totalAssetFiles || entries.length)) * 35), {
-                      current: label,
-                      currentFile: filename,
-                      currentFileSize: hintedSize,
-                      assetDone: restoredAssetFiles.size,
-                      assetTotal: totalAssetFiles || entries.length,
-                  });
-
-                  try {
-                      if (!fileInZip) {
-                          console.warn(`Missing asset in backup: assets/${filename}`);
-                          continue;
-                      }
-                      const base64 = await fileInZip.async("base64");
-                      const ext = (filename.split('.').pop() || 'png').toLowerCase();
-                      const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
-                          : ext === 'gif' ? 'image/gif'
-                          : ext === 'webp' ? 'image/webp'
-                          : 'image/png';
-                      const dataUri = `data:${mime};base64,${base64}`;
-                      for (const ref of refs) {
-                          ref.parent[ref.key] = dataUri;
-                      }
-                      const decodedSize = estimateBase64Bytes(base64);
-                      restoredAssetFiles.add(filename);
-                      showImportProgress('assets', '正在恢复素材...', 35 + Math.floor((restoredAssetFiles.size / Math.max(1, totalAssetFiles || entries.length)) * 35), {
-                          current: label,
-                          currentFile: filename,
-                          currentFileSize: decodedSize,
-                          assetDone: restoredAssetFiles.size,
-                          assetTotal: totalAssetFiles || entries.length,
-                      });
-                  } catch {
-                      console.warn(`Failed to restore asset: assets/${filename}`);
-                  }
-                  await new Promise<void>(resolve => setTimeout(resolve, 0));
-              }
-          };
+          const blobEntries = zip ? await readBlobsIndex(zip as unknown as ZipFileReader) : [];
 
           // 备份里带着 Worker 后端连接时先问一句。谁拿到这个文件都能连上那台 Worker：
           // 不问就连的话，导入者的 API 凭据和聊天上下文会写进别人那台 D1，而 ta 自己
@@ -5910,10 +5927,57 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               );
           }
 
-          showImportProgress('database', '正在写入数据库...', 50, { current: '准备写入数据库', currentFile: '' });
           if (data.characters && listUserSpaces().length > 1) {
-              await (await import('../utils/userSpaceData')).assertUniqueSpaceCharacters(new Map([[SESSION_SPACE_ID, data.characters]]));
+              await (await import('../utils/userSpaceData')).assertUniqueSpaceCharacters(new Map([[SESSION_SPACE_ID, await readBackupField(data.characters)]]));
           }
+          // 只读校验到此全部通过，下面第一次写库（先图片库、后各表），从这里起中断才需要提示重新导入。
+          importMarker.beginWrite();
+          if (zip && blobEntries.length > 0) {
+              await restoreBlobsFromZip(
+                  zip as unknown as ZipFileReader,
+                  blobEntries,
+                  restoreBlobRef,
+                  {
+                      onYield: () => new Promise<void>(r => setTimeout(r, 0)),
+                      onProgress: (done, total, id) => {
+                          showImportProgress('assets', '正在恢复图片二进制...',
+                              30 + Math.floor((done / Math.max(1, total)) * 5),
+                              { current: `图片二进制 ${done}/${total}`, currentFile: id });
+                      },
+                      onDamaged: entry => noteDamagedAsset(entry.id),
+                  },
+              );
+          }
+
+          const hadAssetStoreBackup = data.assets !== undefined;
+          const hadCustomIconsBackup = data.customIcons !== undefined;
+          const hadAppearancePresetsBackup = data.appearancePresets !== undefined;
+
+          const skipDamagedAsset = zip ? createDamagedPictureGuard(zip) : null;
+          const restoreAssetsInPlace = async (root: any, label = '数据'): Promise<void> => {
+              if (!zip || !skipDamagedAsset) return;
+              const progress = (filename: string, size: number | undefined, fileCount: number) => {
+                  showImportProgress('assets', '正在恢复素材...', 35 + Math.floor((restoredAssetFiles.size / Math.max(1, totalAssetFiles || fileCount)) * 35), {
+                      current: label,
+                      currentFile: filename,
+                      currentFileSize: size,
+                      assetDone: restoredAssetFiles.size,
+                      assetTotal: totalAssetFiles || fileCount,
+                  });
+              };
+              await restoreAssetFilesInPlace(zip, root, {
+                  skipDamaged: skipDamagedAsset,
+                  onFile: progress,
+                  onRestored: (filename, size, fileCount) => {
+                      restoredAssetFiles.add(filename);
+                      progress(filename, size, fileCount);
+                  },
+                  onDamaged: filename => noteDamagedAsset(`assets/${filename}`),
+                  onYield: () => new Promise<void>(resolve => setTimeout(resolve, 0)),
+              });
+          };
+
+          showImportProgress('database', '正在写入数据库...', 50, { current: '准备写入数据库', currentFile: '' });
           suppressFeedbackInvitation();
           await DB.importFullData(data, {
               allowBackendConnection,
@@ -5934,6 +5998,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   });
               },
           });
+
+          // 写库没用到的分片字段（协同工作、几个设置数组）都不大，一次读进来，下面照常当普通对象用。
+          await loadAllBackupFields(data);
 
           const hasCollaborationBackup = data.collaborationSessions !== undefined
               || data.collaborationMessages !== undefined
@@ -6229,7 +6296,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
 
           await snapshotLocalStorageMirror().catch(() => {});
           setSysOperation({ status: 'idle', message: '', progress: 100 });
-          clearImportInProgress();
+          importMarker.clear();
+          reportDamagedAssets();
           addToast('恢复成功，系统即将重启...', 'success');
           setTimeout(() => window.location.reload(), 1500);
 
@@ -6237,7 +6305,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           console.error("Import Error:", e);
           setSysOperation({ status: 'idle', message: '', progress: 0 });
           const msg = e instanceof SyntaxError ? 'JSON 格式错误' : (e.message || '未知错误');
-          markImportInProgress('error', sourceName, {
+          importMarker.update('error', {
               sourceSize,
               current: lastCurrent,
               currentFile: lastCurrentFile,
@@ -6247,8 +6315,10 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               error: msg,
           });
           throw new Error(`恢复失败: ${msg}`);
+      } finally {
+          await zip?.close().catch(() => {});
       }
-  };
+  });
 
   /**
    * 把这台设备和它名下的云端数据一起归零。
@@ -6287,7 +6357,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
     if (appId === AppID.Date && suspendedDateRef.current) setActiveCharacterId(suspendedDateRef.current.charId);
     setActiveApp(appId);
   };
-  const closeApp = () => setActiveApp(AppID.Launcher);
+  const closeApp = useCallback(() => setActiveApp(AppID.Launcher), []);
   // 从聊天直接进入某角色的见面：切换当前角色 + 标记自动进入 + 打开见面 App
   const openDateWithChar = (charId: string) => {
     // 和这个角色的见面正挂着：回到那场见面，不另开一场。

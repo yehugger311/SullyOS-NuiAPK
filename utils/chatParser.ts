@@ -1,6 +1,8 @@
 import { withReplyCancellation, type ReplyRun } from './chatReplyCancellation';
 
 import { DB } from './db';
+import { BUILTIN_SULLY_ID } from './sullyIdentity';
+import { SULLY_HELP_COMMAND, SULLY_HELP_PREVIEW } from './sullyHelpCommand';
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { APIConfig, CharacterProfile, CharPlaylistSong, TaskV2, UserProfile } from '../types';
 import { sanitizeForBubble } from './sanitize';
@@ -16,6 +18,7 @@ import {
 import { syncTaskReminders } from './taskReminderScheduler';
 import { wallClockToTimestamp } from './timezone';
 import { settleTransfer, settleCharExpense } from './walletOps';
+import { recordHomeLifeEvent, HomeLifeEventInput } from './homeOps';
 import { CollaborationStore } from '../features/collaboration/store';
 import {
     collaborationFileMessageMetadata,
@@ -217,6 +220,16 @@ export const ChatParser = {
             ...(inheritMeta ? { metadata: { ...inheritMeta, ...(msg.metadata || {}) } } : {}),
         });
 
+        const withoutHandoff = content.replace(SULLY_HELP_COMMAND, '');
+        if (withoutHandoff !== content) {
+            content = withoutHandoff.trim();
+            if (charId === BUILTIN_SULLY_ID) {
+                await replyStep(() => persist({
+                    charId, role: 'assistant', type: 'sully_help_card', content: SULLY_HELP_PREVIEW,
+                }));
+            }
+        }
+
         // COLLAB_FILE — current-chat collaboration mode can hand the user an
         // existing file from the sidecar cabinet. The chat message stores only
         // metadata + assetId; the canonical Blob remains in CollaborationStore.
@@ -342,6 +355,37 @@ export const ChatParser = {
             await settleCharExpense({ charId, kind, amount, note });
         }
         content = content.replace(EXPENSE_RE, '').trim();
+
+        // HOME — 已发生的住所生活事件。花钱本身不改栖居，避免把外卖/打车猜成家中物品。
+        const HOME_EVENT_RE = /\[\[\s*ACTION\s*[：:]\s*HOME\s*[：:]\s*(BUY|RESTOCK|CONSUME|DISCARD)((?:\s*\|[^\]\n]*)*)\]\]/gi;
+        const homeSourceId = inheritMeta?.activeMsg2?.messageId || (messageTimestamp ? `${charId}:${messageTimestamp}` : '');
+        for (const homeMatch of Array.from(content.matchAll(HOME_EVENT_RE))) {
+            const action = homeMatch[1].toUpperCase();
+            const fields = (homeMatch[2] || '').split('|').slice(1).map(field => field.trim());
+            let input: HomeLifeEventInput;
+            if (action === 'BUY') {
+                const kindText = (fields[2] || '').toLowerCase();
+                const dateInKindField = /^\d{4}-\d{2}-\d{2}$/.test(kindText);
+                input = {
+                    type: 'buy', name: fields[0] || '', roomName: fields[1],
+                    kind: kindText === 'consumable' || kindText === '消耗品' || dateInKindField ? 'consumable' : 'durable',
+                    expiryDate: fields[3] || (dateInKindField ? fields[2] : undefined),
+                };
+            } else if (action === 'RESTOCK') {
+                input = { type: 'restock', name: fields[0] || '', expiryDate: fields[1], roomName: fields[2] };
+            } else {
+                input = { type: action === 'CONSUME' ? 'consume' : 'discard', name: fields[0] || '' };
+            }
+            try {
+                await recordHomeLifeEvent(charId, input, {
+                    source: 'chat', now: messageTimestamp,
+                    eventId: homeSourceId ? `${homeSourceId}:HOME:${homeMatch[0].replace(/\s+/g, '')}` : undefined,
+                });
+            } catch (error) {
+                console.warn('[Home] 生活事件写入失败（不影响聊天）:', error);
+            }
+        }
+        content = content.replace(HOME_EVENT_RE, '').trim();
 
         // MUSIC_ACTION — char 对 user 正在听的歌表态（只处理第一次出现，每条消息最多一次插卡）
         // 支持的格式（后两种是为了让 char 自己挑歌单 / 新建歌单）：

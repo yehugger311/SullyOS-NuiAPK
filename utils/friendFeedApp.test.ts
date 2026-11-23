@@ -338,7 +338,7 @@ it('opens an alias profile without mixing the owner main posts and retains accou
     ];});await new Promise(r=>setTimeout(r,30));});
     await click(host,'查看半夜吃面的主页');
     expect(host.querySelector('.friend-feed-posts')?.textContent).toContain('深夜的面');expect(host.querySelector('.friend-feed-posts')?.textContent).not.toContain('白天的工作');
-    await click(host,'哔哔设置');await click(host,'更多设置');await click(host,'恢复默认设置');await click(host,'保存设置');
+    await click(host,'哔哔设置');await click(host,'更多设置');await click(host,'恢复默认设置');await click(host,'确认恢复默认设置');await click(host,'保存设置');
     expect((await readFriendFeed()).settings?.identities[m.chars[1].id].accounts[0].name).toBe('半夜吃面');
 });
 afterEach(() => {act(() => roots.forEach(r => r.unmount())); hosts.forEach(h => h.remove()); vi.unstubAllGlobals(); vi.clearAllMocks();});
@@ -383,6 +383,37 @@ it('collapses long threads to three replies and opens a notification at its exac
         expect(runImmediateFriendReplies).not.toHaveBeenCalled();expect(refreshFriendFeed).not.toHaveBeenCalled();
     }finally{visible.mockRestore();HTMLElement.prototype.scrollIntoView=original;}
 });
+it('restores an expanded thread and its reading position after reply, edit and delete; double tap returns to the top',async()=>{
+    const id=await seedUserNotices();
+    await mutateFriendFeed(feed=>{
+        const post=feed.posts.find(p=>p.id===id)!, root=post.comments[0];
+        for(let i=0;i<8;i++) post.comments.push({id:'leaf-'+i,authorId:'npc:'+i,authorName:'楼内'+i,text:'留言'+i,createdAt:i,
+            localReply:{id:root.id,authorName:root.authorName,authorId:root.authorId,text:root.text}});
+    });
+    vi.mocked(runImmediateFriendReplies).mockResolvedValue({commentCount:0} as any);
+    const host=await render(React.createElement(FriendFeedApp));
+    await act(async()=>{requestFriendInbox({postId:id});});await settle(host);
+    await click(host,'查看全部 8 条回复');
+    const scroll=host.querySelector<HTMLElement>('.friend-feed-scroll')!;
+    for(const [action,submit] of [['回复','发表评论'],['编辑','保存修改'],['删除','确认删除']]){
+        scroll.scrollTop=513;
+        await click(host,action+'楼内6的评论');
+        if(action!=='删除') await act(async()=>{
+            const textarea=host.querySelector('textarea')!;
+            Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value')!.set!.call(textarea,'更新'+action);
+            textarea.dispatchEvent(new Event('input',{bubbles:true}));
+        });
+        await click(host,submit);
+        expect(scroll.scrollTop).toBe(513);
+        expect(host.querySelector('[data-comment-id="leaf-7"]')).not.toBeNull();
+        expect(host.querySelector('.ff-thread-toggle')?.getAttribute('aria-expanded')).toBe('true');
+    }
+    const title=host.querySelector('.ff-detail-title')!;
+    const tap=(detail:number)=>act(()=>{title.dispatchEvent(new MouseEvent('click',{bubbles:true,detail}));});
+    tap(1);expect(scroll.scrollTop).toBe(513);tap(2);expect(scroll.scrollTop).toBe(0);
+    expect(refreshFriendFeed).not.toHaveBeenCalled();
+});
+
 it.each(['island','moments','insta','journal','weibo','twitter'] as const)('lets the user reply to a comment in %s, cancel safely and submit into its thread',async theme=>{
     vi.mocked(runImmediateFriendReplies).mockResolvedValue({commentCount:0} as any);
     const id=await seedUserNotices();await saveFriendFeedSettings({...defaultFriendFeedSettings(),theme});
@@ -500,7 +531,8 @@ it('selects, removes and publishes local photos without text, then finds the pos
         expect(host.querySelectorAll('.ff-compose-thumbnails img')).toHaveLength(2);
         await click(host,'移除配图 1');expect(host.querySelector('textarea')?.required).toBe(false);
         await click(host,'发布动态');
-        const state=await readFriendFeed();expect(state.posts).toHaveLength(1);expect(state.posts[0].text).toBe('');expect(state.posts[0].images).toHaveLength(1);
+        await act(async()=>{await vi.waitFor(async()=>expect((await readFriendFeed()).posts).toHaveLength(1));});
+        const state=await readFriendFeed();expect(state.posts[0].text).toBe('');expect(state.posts[0].images).toHaveLength(1);
         await click(host,'图片');expect(host.querySelectorAll('.ff-social-post')).toHaveLength(1);
         expect(runImmediateFriendReplies).not.toHaveBeenCalled();expect(refreshFriendFeed).not.toHaveBeenCalled();
     } finally {compression.mockRestore();}
@@ -609,11 +641,11 @@ it('previews settings locally, discards cancelled edits and shares saved prefere
     expect((await readFriendFeed()).settings?.theme).toBe('moments');
     await click(embedded, '哔哔设置');await click(embedded, '外观与阅读');
     expect(embedded.querySelector('input[name=feed-theme]')).toBeNull();
-    await click(embedded, '取消');await click(embedded, '更多设置');await click(embedded, '恢复默认设置');
+    await click(embedded, '取消');await click(embedded, '更多设置');await click(embedded, '恢复默认设置');await click(embedded, '确认恢复默认设置');
     await click(embedded, '保存设置');
     expect((await readFriendFeed()).settings?.theme).toBe('moments');
     expect(desktop.querySelector('.friend-feed')?.getAttribute('data-theme')).toBe('moments');
-    await click(desktop, '更多设置'); await click(desktop, '恢复默认设置'); await click(desktop, '保存设置');
+    await click(desktop, '更多设置'); await click(desktop, '恢复默认设置'); await click(desktop, '确认恢复默认设置'); await click(desktop, '保存设置');
     await settle(embedded);
     expect((await readFriendFeed()).settings?.layout).toBe('paper');
     expect(embedded.querySelector('.friend-feed')?.getAttribute('data-layout')).toBe('paper');
@@ -679,7 +711,8 @@ it('hides paid import controls while keeping imported sources readable and old k
     await click(host, '更多设置');
     expect(host.querySelector('input[type=password]')).toBeNull();
     expect(host.textContent).not.toContain('注册 TikHub');
-    await click(host, '移除旧 Key'); expect(readTikHubKey()).toBe('');
+    await click(host, '移除旧 Key'); expect(readTikHubKey()).toBe('test-only-key');
+    await click(host, '确认移除旧 Key'); expect(readTikHubKey()).toBe('');
     expect(fetcher).not.toHaveBeenCalled(); expect((await readFriendFeed()).posts).toHaveLength(1);
 });
 it('mixes bound Weibo and local posts chronologically and filters the same entries into profiles',async()=>{

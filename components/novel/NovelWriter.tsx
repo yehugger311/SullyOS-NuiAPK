@@ -13,6 +13,7 @@ import ConfirmDialog from '../os/ConfirmDialog';
 import { useOS } from '../../context/OSContext';
 import { safeResponseJson } from '../../utils/safeApi';
 import { DB } from '../../utils/db';
+import { injectMemoryPalace } from '../../utils/memoryPalace/pipeline';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../character/CharacterGroupFilter';
 import { getLocalDateKey } from '../../utils/localDate';
 import TokenImg from '../os/TokenImg';
@@ -240,10 +241,14 @@ const NovelWriter: React.FC<NovelWriterProps> = ({
             // Sampling is a writing-task default, not inferred from the user's personality.
             const temperature = 0.85;
 
+            // 召回结果只挂在本次请求的副本上：角色对象上不存召回，也不能读别处留下的旧值。
+            const recallChar = { ...char, memoryPalaceInjection: '', roomPlatesInjection: '' };
+            await injectMemoryPalace(recallChar, undefined, activeBook.title, userProfile.name);
+
             const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-                body: JSON.stringify({ model: apiConfig.model, messages: (await ContextBuilder.buildCharacterRequest({ char, user: userProfile }, [{ role: "user", content: prompt }])), temperature, max_tokens: 8000 }),
+                body: JSON.stringify({ model: apiConfig.model, messages: (await ContextBuilder.buildCharacterRequest({ char: recallChar, user: userProfile }, [{ role: "user", content: prompt }])), temperature, max_tokens: 8000 }),
                 __sullyMeta: {
                     appId: 'novel',
                     appName: '一起写小说',
@@ -305,7 +310,7 @@ const NovelWriter: React.FC<NovelWriterProps> = ({
         await runGeneration(selectedChar, userPrompt, currentSegments);
     };
 
-    const handleReroll = async () => {
+    const handleReroll = () => {
         if (!targetCharId) return;
         const selectedChar = characters.find(c => c.id === targetCharId);
         if (!selectedChar) return;
@@ -317,10 +322,19 @@ const NovelWriter: React.FC<NovelWriterProps> = ({
             if (last.authorId !== 'user') { newSegments.pop(); deletedCount++; } else { break; }
         }
         if (deletedCount === 0) { addToast('没有可重随的 AI 内容', 'info'); return; }
-        setSegments(newSegments);
-        updateNovel(activeBook.id, { segments: newSegments });
-        addToast('正在重随...', 'info');
-        await runGeneration(selectedChar, "", newSegments);
+        setConfirmDialog({
+            isOpen: true,
+            title: '重新生成最后一段？',
+            message: `将删除末尾的 ${deletedCount} 段 AI 内容，并让 ${selectedChar.name} 重新生成。`,
+            variant: 'warning',
+            onConfirm: () => {
+                setConfirmDialog(null);
+                setSegments(newSegments);
+                updateNovel(activeBook.id, { segments: newSegments });
+                addToast('正在重随...', 'info');
+                void runGeneration(selectedChar, "", newSegments);
+            }
+        });
     };
 
     const handleEditSegment = (seg: NovelSegment) => {

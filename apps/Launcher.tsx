@@ -361,7 +361,7 @@ const CALENDAR_WEEKDAYS = [
 ] as const;
 
 // 4. Widget Page Component (Calendar + Events)
-const WidgetsPage = React.memo(({ contentColor: inheritedContentColor, openApp, anniversaries, characters, acnh: acnhSkin = false, paper: paperSkin = false }: any) => {
+const WidgetsPage = React.memo(({ active, contentColor: inheritedContentColor, openApp, anniversaries, characters, acnh: acnhSkin = false, paper: paperSkin = false }: any) => {
     // 沿用日程卡片美化：选了非原版配色时，日历和 Upcoming Events 跟着换色，
     // 并覆盖动森/纸质皮肤（与 ScheduleHomeWidget 的 effectiveAcnh/effectivePaper 规则一致）。
     const { theme } = useOS();
@@ -392,6 +392,7 @@ const WidgetsPage = React.memo(({ contentColor: inheritedContentColor, openApp, 
     // --- 求职面试/笔试环节 → 日历事件源（琥珀点）；只取未过期，零侵入纪念日数据 ---
     const [jobEvents, setJobEvents] = useState<{ id: string; date: string; title: string; ts: number }[]>([]);
     useEffect(() => {
+        if (!active) return;
         let alive = true;
         const toDateStr = (ts: number) => {
             const d = new Date(ts);
@@ -417,12 +418,24 @@ const WidgetsPage = React.memo(({ contentColor: inheritedContentColor, openApp, 
                 if (alive) setJobEvents(evs);
             } catch { /* 表未建等场景静默 */ }
         };
-        load();
-        const onUpd = () => load();
-        window.addEventListener('sully-job-updated', onUpd);
-        const iv = window.setInterval(load, 60000); // Launcher 常驻不卸载，定时刷新防陈旧
-        return () => { alive = false; window.removeEventListener('sully-job-updated', onUpd); window.clearInterval(iv); };
-    }, []);
+        let timer: ReturnType<typeof setInterval>;
+        const refresh = () => { if (!document.hidden) void load(); };
+        const syncVisibility = () => {
+            clearInterval(timer);
+            if (document.hidden) return;
+            refresh();
+            timer = setInterval(refresh, 60_000);
+        };
+        syncVisibility();
+        document.addEventListener('visibilitychange', syncVisibility);
+        window.addEventListener('sully-job-updated', refresh);
+        return () => {
+            alive = false;
+            clearInterval(timer);
+            document.removeEventListener('visibilitychange', syncVisibility);
+            window.removeEventListener('sully-job-updated', refresh);
+        };
+    }, [active]);
 
     // --- Upcoming events: only today + future, soonest first (non-mutating), paginated ---
     const todayStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -741,6 +754,7 @@ const Launcher: React.FC<{ staticPreview?: boolean }> = ({ staticPreview = false
   useEffect(() => {
       let cancelled = false;
       const loadData = async () => {
+          if (document.hidden) return;
           // SAFEGUARD: If characters array is empty, reset widget char
           if (!characters || characters.length === 0) {
               setWidgetChar(null);
@@ -770,11 +784,14 @@ const Launcher: React.FC<{ staticPreview?: boolean }> = ({ staticPreview = false
           }
       };
       
-      if (isDataLoaded) {
-          loadData();
-      }
-      return () => { cancelled = true; };
-  }, [activeCharacterId, lastMsgTimestamp, isDataLoaded, characters]); // Trigger on characters change
+      if (!isDataLoaded || activeApp !== AppID.Launcher) return;
+      void loadData();
+      document.addEventListener('visibilitychange', loadData);
+      return () => {
+          cancelled = true;
+          document.removeEventListener('visibilitychange', loadData);
+      };
+  }, [activeApp, activeCharacterId, lastMsgTimestamp, isDataLoaded, characters]);
 
   // 时光契约跨日结算：数据加载完成后只跑一次（ref 闸门保证不重复）。
   // 老 Task → TaskV2 迁移是幂等的，ScheduleApp 内也有兜底，但 Launcher 先跑一次更稳。
@@ -1248,11 +1265,11 @@ const Launcher: React.FC<{ staticPreview?: boolean }> = ({ staticPreview = false
       )}
       
       {/* Visual Elements (Decorative Background - Static, low-cost gradients instead of blur) */}
-      {/* 动森模式跳过：这层冷蓝光斑会污染奶油底 */}
+      {/* 动森模式跳过；底部暖色光斑仅用于纸张壁纸，避免给其他壁纸染色。 */}
       {!acnh && (
       <div className="absolute inset-0 pointer-events-none">
           <div className="absolute -top-20 -right-20 w-80 h-80 rounded-full" style={{ background: paper ? 'radial-gradient(circle, rgba(255,255,255,0.22) 0%, transparent 68%)' : 'radial-gradient(circle, rgba(255,255,255,0.05) 0%, transparent 70%)' }}></div>
-          <div className="absolute -bottom-20 -left-20 w-80 h-80 rounded-full" style={{ background: paper ? 'radial-gradient(circle, rgba(123,104,78,0.06) 0%, transparent 68%)' : 'radial-gradient(circle, rgba(59,130,246,0.08) 0%, transparent 70%)' }}></div>
+          {paper && <div className="absolute -bottom-20 -left-20 w-80 h-80 rounded-full" style={{ background: 'radial-gradient(circle, rgba(123,104,78,0.06) 0%, transparent 68%)' }}></div>}
       </div>
       )}
 
@@ -1287,6 +1304,7 @@ const Launcher: React.FC<{ staticPreview?: boolean }> = ({ staticPreview = false
               >
                   {page.type === 'widgets' ? (
                       <WidgetsPage
+                        active={activeApp === AppID.Launcher && activePageIndex === idx}
                         contentColor={contentColor}
                         openApp={openApp}
                         anniversaries={anniversaries}

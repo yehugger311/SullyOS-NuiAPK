@@ -1,15 +1,18 @@
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { DailySchedule, ScheduleSlot, ScheduleRevision, CharacterProfile, OSTheme } from '../../types';
 import { getCurrentScheduleSlotIndex, getScheduleWallClock } from '../../utils/scheduleTime';
+import { useTickingNow } from '../../hooks/useTickingNow';
 import { resolveCharTimeZone, tzShortLabel } from '../../utils/timezone';
 import { useOS } from '../../context/OSContext';
 import { resolveScheduleCardPalette } from '../../utils/scheduleAppearance';
 import ScheduleAppearanceButton, { ScheduleCustomCssStyle } from './ScheduleAppearanceButton';
 import TokenImg from '../os/TokenImg';
+import ScheduleTheaterButton from './ScheduleTheaterButton';
 import {getHomeScheduleRooms, homePositionLabel} from '../../utils/homeSchedule';
 
 import { putImageBlob } from '../../utils/blobRef';
+import { useConfirmDialog } from '../../hooks/useConfirmDialog';
 
 interface ScheduleCardProps {
     schedule: DailySchedule | null;
@@ -45,20 +48,6 @@ const formatDate = (now: Date): string => {
 const formatClock = (now: Date): string =>
     `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
 
-/**
- * 每分钟走一次的「此刻」。卡片可能一直开着，不刷新的话顶部的钟会停，
- * NOW 标记也不会随着时间推进挪到下一个时段。
- */
-const useTickingNow = (fixed?:Date): Date => {
-    const [now, setNow] = useState(() => fixed || new Date());
-    useEffect(() => {
-        if(fixed)return;
-        const id = window.setInterval(() => setNow(new Date()), 30_000);
-        return () => window.clearInterval(id);
-    }, [fixed]);
-    return fixed||now;
-};
-
 export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previewNow?:Date}> = ({
     theme,previewNow,
     schedule,
@@ -72,7 +61,10 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
     onPlayTheater,
     isGenerating = false,
 }) => {
+    const { requestConfirm, confirmDialog } = useConfirmDialog({ portal: true });
     const [editingIdx, setEditingIdx] = useState<number | null>(null);
+    const [openRevKey, setOpenRevKey] = useState<string | null>(null);
+    const [showRevLog, setShowRevLog] = useState(false);
     const [editTime, setEditTime] = useState('');
     const [editActivity, setEditActivity] = useState('');
     const [editDesc, setEditDesc] = useState('');
@@ -86,18 +78,6 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
     const longPressTimerRef = useRef<number | null>(null);
     const longPressTriggeredRef = useRef(false);
     const LONG_PRESS_MS = 500;
-
-    // 点了「还没到的时段」的播放按钮 → 在该按钮上方冒一个一闪而过的小提示
-    const [lockedHintIdx, setLockedHintIdx] = useState<number | null>(null);
-    const lockedHintTimerRef = useRef<number | null>(null);
-    // ⑦ 修订 diff：展开了哪个时段的修订卡片（按 startTime）+ 底部「今日变动」折叠区
-    const [openRevKey, setOpenRevKey] = useState<string | null>(null);
-    const [showRevLog, setShowRevLog] = useState(false);
-    const showLockedHint = (idx: number) => {
-        if (lockedHintTimerRef.current) window.clearTimeout(lockedHintTimerRef.current);
-        setLockedHintIdx(idx);
-        lockedHintTimerRef.current = window.setTimeout(() => setLockedHintIdx(null), 1800);
-    };
 
     const startLongPress = (idx: number) => {
         longPressTriggeredRef.current = false;
@@ -237,7 +217,18 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
                     )}
                     {!compact && onReroll && (
                         <button
-                            onClick={onReroll}
+                            onClick={async () => {
+                                if (schedule?.slots?.length) {
+                                    const confirmed = await requestConfirm({
+                                        title: '重新生成今日日程？',
+                                        message: `当前的 ${schedule.slots.length} 条日程安排将被覆盖。`,
+                                        confirmText: '重新生成',
+                                        variant: 'warning',
+                                    });
+                                    if (!confirmed) return;
+                                }
+                                onReroll();
+                            }}
                             disabled={isGenerating}
                             className="text-[10px] font-bold px-2 py-0.5 rounded-full border transition-all active:scale-95 disabled:opacity-30"
                             style={{ background: accentBg, borderColor: palette.line }}
@@ -439,33 +430,8 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
                                     {/* 小剧场播放按钮：全程都在，已过去/正在进行的可点（▶ 生成 / ↻ 重看）；
                                         还没到的时段灰着，点了冒个「还没到这个时间哦」的小提示。 */}
                                     {!compact && onPlayTheater && (
-                                        <div className="relative flex-shrink-0 mt-0.5">
-                                            <button
-                                                className={`w-7 h-7 rounded-full flex items-center justify-center text-xs transition-all ${isFuture ? 'cursor-not-allowed' : 'active:scale-90'}`}
-                                                style={{
-                                                    background: isFuture ? 'color-mix(in srgb, var(--schedule-text) 6%, transparent)' : (slot.theater ? accentHsl : 'color-mix(in srgb, var(--schedule-text) 12%, transparent)'),
-                                                    color: isFuture ? 'color-mix(in srgb, var(--schedule-text) 28%, transparent)' : (slot.theater ? cardBg : contentColor),
-                                                }}
-                                                title={isFuture ? '还没到这个时间哦' : (slot.theater ? '重看小剧场' : '窥视这一刻')}
-                                                onPointerDown={(e) => { e.stopPropagation(); cancelLongPress(); }}
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    longPressTriggeredRef.current = false;
-                                                    if (isFuture) { showLockedHint(idx); return; }
-                                                    onPlayTheater(idx);
-                                                }}
-                                            >
-                                                {slot.theater && !isFuture ? '↻' : '▶'}
-                                            </button>
-                                            {lockedHintIdx === idx && (
-                                                <div
-                                                    className="absolute right-0 bottom-full mb-1.5 z-20 whitespace-nowrap px-2 py-1 rounded-lg text-[10px] font-bold animate-fade-in pointer-events-none"
-                                                    style={{ background: 'rgba(20,16,30,0.96)', color: '#fff', border: '1px solid rgba(255,255,255,0.15)', boxShadow: '0 4px 14px rgba(0,0,0,0.4)' }}
-                                                >
-                                                    还没到这个时间哦
-                                                </div>
-                                            )}
-                                        </div>
+                                        <ScheduleTheaterButton slot={slot} future={isFuture} onPress={cancelLongPress}
+                                            onPlay={() => { longPressTriggeredRef.current = false; onPlayTheater(idx); }} />
                                     )}
                                 </div>
                                 {/* ⑦ 修订展开卡片：改动前划线灰 → 改动后高亮，配角色第一人称原因气泡 */}
@@ -597,10 +563,21 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
                         </button>
                         <button
                             className="w-full py-3 text-sm font-bold text-red-500 border-t border-slate-100 hover:bg-red-50 transition-colors"
-                            onClick={() => {
+                            onClick={async () => {
                                 const i = actionIdx;
                                 setActionIdx(null);
-                                if (i !== null && onDelete) onDelete(i);
+                                if (i !== null && onDelete) {
+                                    const targetSlot = schedule.slots[i];
+                                    const confirmed = await requestConfirm({
+                                        title: '删除这条日程？',
+                                        message: targetSlot
+                                            ? `确定删除「${targetSlot.startTime} · ${targetSlot.activity}」吗？`
+                                            : '确定删除这条日程安排吗？',
+                                        confirmText: '删除',
+                                        variant: 'danger',
+                                    });
+                                    if (confirmed) onDelete(i);
+                                }
                             }}
                         >
                             删除
@@ -624,6 +601,7 @@ export const ScheduleCardView: React.FC<ScheduleCardProps & {theme:OSTheme;previ
             <div className="absolute bottom-2 left-5 opacity-5 pointer-events-none text-[8px] font-mono tracking-widest">
                 DESIGN: NOI
             </div>
+            {confirmDialog}
         </div>
     );
 };

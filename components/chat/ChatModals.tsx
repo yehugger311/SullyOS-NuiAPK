@@ -2,7 +2,7 @@
 import React, { useRef, useState } from 'react';
 import Modal from '../os/Modal';
 import TokenImg from '../os/TokenImg';
-import NetImg from '../os/NetImg';
+import EmojiImage from './EmojiImage';
 import { CharacterProfile, Message, EmojiCategory, DailySchedule, ScheduleSlot, ApiPreset, APIConfig, ListenSongConfig } from '../../types';
 import ListenSongSettings from './ListenSongSettings';
 import ScheduleCard from '../schedule/ScheduleCard';
@@ -10,7 +10,8 @@ import EmotionSettingsPanel from './EmotionSettingsPanel';
 import ChatInputSettings from './ChatInputSettings';
 import ChatSettingsSection from './ChatSettingsSection';
 import TranslationStylePicker from './TranslationStylePicker';
-import type { ChatTranslationStyle } from '../../utils/chatTranslationStyle';
+import { DEFAULT_SUBTITLE_SETTINGS, type ChatTranslationStyle, type ChatTranslationMode, type ChatSubtitleSettings } from '../../utils/chatTranslationStyle';
+import SubtitleSettingsDialog from './SubtitleSettingsDialog';
 import SecretNote from './SecretNote';
 import type { ChatInputPreferences } from '../../utils/chatInputPreferences';
 import { isTranslationLangPreset, normalizeTranslationLangLabel, TRANSLATION_LANG_MAX_LENGTH, TRANSLATION_LANG_PRESETS } from '../../utils/translationLang';
@@ -28,8 +29,6 @@ interface ChatModalsProps {
     setTransferAmt: (v: string) => void;
     transferNote: string;
     setTransferNote: (v: string) => void;
-    emojiImportText: string;
-    setEmojiImportText: (v: string) => void;
     settingsContextLimit: number;
     setSettingsContextLimit: (v: number) => void;
     settingsContextRangeMode: ContextRangeMode;
@@ -74,7 +73,6 @@ interface ChatModalsProps {
 
     // Handlers
     onTransfer: () => void;
-    onImportEmoji: () => void;
     onSaveSettings: () => void;
     onOpenHistoryCleanup?: () => void;
     onArchive: () => void;
@@ -104,9 +102,11 @@ interface ChatModalsProps {
     translationEnabled?: boolean;
     onToggleTranslation?: () => void;
     translationExpanded?: boolean;
-    onToggleTranslationExpanded?: () => void;
+    onSetTranslationMode?: (mode: ChatTranslationMode) => void;
     translationStyle?: ChatTranslationStyle;
-    onSetTranslationStyle?: (style: ChatTranslationStyle) => void;
+    subtitleSettings?: ChatSubtitleSettings;
+    appearanceFonts?: Array<{ name: string; source: string }>;
+    onSetSubtitleSettings?: (settings: ChatSubtitleSettings) => void;
     translateSourceLang?: string;
     translateTargetLang?: string;
     onSetTranslateSourceLang?: (lang: string) => void;
@@ -261,7 +261,6 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     modalType, setModalType, compactHome=false,
     transferAmt, setTransferAmt,
     transferNote, setTransferNote,
-    emojiImportText, setEmojiImportText,
     settingsContextLimit, setSettingsContextLimit,
     settingsContextRangeMode, setSettingsContextRangeMode,
     settingsHideSysLogs, setSettingsHideSysLogs,
@@ -275,13 +274,13 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     selectedMessage, selectedEmoji, selectedCategory, activeCharacter, messages,
     allHistoryMessages = [],
     contextRangeSnapshot,
-    onTransfer, onImportEmoji, onSaveSettings,
+    onTransfer, onSaveSettings,
     onOpenHistoryCleanup,
     onArchive, onCreatePrompt, onEditPrompt, onSavePrompt, onDeletePrompt,
     onSetHistoryStart, onRestoreAdaptiveContext, onJumpToMessageInChat, onEnterSelectionMode, onReplyMessage, onEditMessageStart, onConfirmEditMessage, onDeleteMessage, onCopyMessage, onToggleMessageFavorite, messageFavorited, onDeleteEmoji, onDeleteCategory, onRenameCategory, onDownloadCategory,
     allCharacters = [], onSaveCategoryVisibility,
-    translationEnabled, onToggleTranslation, translationExpanded, onToggleTranslationExpanded, translationStyle = 'bubble', onSetTranslationStyle, translateSourceLang, translateTargetLang, onSetTranslateSourceLang, onSetTranslateLang,
-    xhsEnabled, onToggleXhs,
+    translationEnabled, onToggleTranslation, translationExpanded, onSetTranslationMode, translationStyle = 'bubble', subtitleSettings = DEFAULT_SUBTITLE_SETTINGS, onSetSubtitleSettings, translateSourceLang, translateTargetLang, onSetTranslateSourceLang, onSetTranslateLang,
+    appearanceFonts, xhsEnabled, onToggleXhs,
     htmlModeEnabled, onToggleHtmlMode, htmlModeCustomPrompt, setHtmlModeCustomPrompt,
     listenSongApiReady, listenSongUserName, onChangeListenSong,
     chatVoiceEnabled, onToggleChatVoice, chatVoiceAutoPlay, onToggleChatVoiceAutoPlay, chatVoiceLang, onSetChatVoiceLang,
@@ -295,6 +294,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     apiPresets, onAddApiPreset, onSaveEmotion, onClearBuffs, onUpdateCharacter, onScheduleConfigChange,
 }) => {
     const [visibilitySelection, setVisibilitySelection] = useState<Set<string>>(new Set());
+    const [subtitleSettingsOpen, setSubtitleSettingsOpen] = useState(false);
     const [historyPage, setHistoryPage] = useState(0);
     const [historySearch, setHistorySearch] = useState('');
     const longPressTimerRef = useRef<number | null>(null);
@@ -376,7 +376,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     return (
         <>
             <Modal 
-                isOpen={modalType === 'transfer'} title="Credits 转账" onClose={() => setModalType('none')}
+                isOpen={modalType === 'transfer'} className="sully-chat-transfer-compose" title="Credits 转账" onClose={() => setModalType('none')}
                 footer={<><button onClick={() => setModalType('none')} className="flex-1 py-3 bg-slate-100 text-slate-700 rounded-2xl">取消</button><button onClick={onTransfer} className="flex-1 py-3 bg-orange-500 text-white rounded-2xl">确认</button></>}
             >
                 <input type="number" value={transferAmt} onChange={e => setTransferAmt(e.target.value)} placeholder="金额" className="w-full bg-slate-100 text-slate-800 placeholder:text-slate-400 rounded-2xl px-5 py-4 text-lg font-bold" autoFocus />
@@ -398,19 +398,10 @@ const ChatModals: React.FC<ChatModalsProps> = ({
             </Modal>
 
             <Modal 
-                isOpen={modalType === 'emoji-import'} title="表情注入" onClose={() => setModalType('none')}
-                footer={<button onClick={onImportEmoji} className="w-full py-4 bg-primary text-white font-bold rounded-2xl">添加至当前分类</button>}
-            >
-                <div className="space-y-3">
-                    <p className="text-xs text-slate-400">表情将导入到你当前选中的分类。</p>
-                    <textarea value={emojiImportText} onChange={e => setEmojiImportText(e.target.value)} placeholder="Name--URL (每行一个)" className="w-full h-40 bg-slate-100 text-slate-800 placeholder:text-slate-400 rounded-2xl p-4 resize-none" />
-                </div>
-            </Modal>
-
-            <Modal 
                 isOpen={modalType === 'chat-settings'} title="聊天设置" onClose={() => setModalType('none')}
                 footer={<button onClick={onSaveSettings} className="w-full py-3 bg-primary text-white font-bold rounded-2xl">保存设置</button>}
             >
+                {subtitleSettingsOpen && <SubtitleSettingsDialog key={activeCharacter.id} value={subtitleSettings} appearanceFonts={appearanceFonts} onChange={settings => onSetSubtitleSettings?.(settings)} onClose={() => setSubtitleSettingsOpen(false)} />}
                 <div className="space-y-3">
                     <ChatSettingsSection title="输入与发送" summary="表情联想、回车与自动回复">
                         <ChatInputSettings value={settingsInputPreferences} onChange={setSettingsInputPreferences} />
@@ -605,20 +596,11 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                         inputPlaceholder="自定义，如 中文（繁體）"
                                         onSelect={onSetTranslateLang}
                                     />
-                                    <button
-                                        type="button"
-                                        onClick={onToggleTranslationExpanded}
-                                        className="w-full flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-left active:bg-slate-50"
-                                    >
-                                        <span>
-                                            <span className="block text-[11px] font-bold text-slate-600">原文与译文同时展开</span>
-                                            <span className="block mt-0.5 text-[9px] leading-relaxed text-slate-400">开启后直接显示两种语言，可选择译文样式。</span>
-                                        </span>
-                                        <span className={`shrink-0 w-10 h-6 rounded-full p-1 transition-colors flex items-center ${translationExpanded ? 'bg-primary' : 'bg-slate-200'}`}>
-                                            <span className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${translationExpanded ? 'translate-x-4' : ''}`} />
-                                        </span>
-                                    </button>
-                                    {translationExpanded && <TranslationStylePicker value={translationStyle} onChange={onSetTranslationStyle} />}
+                                    <TranslationStylePicker value={translationExpanded ? translationStyle : 'collapsed'} onChange={onSetTranslationMode} />
+                                    {translationExpanded && translationStyle === 'subtitle' && <button type="button" onClick={() => setSubtitleSettingsOpen(true)}
+                                        className="flex min-h-11 w-full items-center justify-between border-t border-slate-100 py-2 text-left text-[11px] text-primary">
+                                        <span>字幕设置与预览<span className="mt-0.5 block text-[10px] text-slate-400">字号、颜色与字体</span></span><span aria-hidden="true">›</span>
+                                    </button>}
                                     {/* Preview */}
                                     <div className="text-[11px] text-center text-slate-500 bg-slate-50 rounded-lg py-2">
                                         选<span className="font-bold text-slate-700">{translateSourceLang || '?'}</span> 译<span className="font-bold text-primary">{translateTargetLang || '?'}</span>
@@ -1071,11 +1053,11 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                     {Array.isArray(selectedEmoji) ? (
                         <div className="flex flex-wrap justify-center gap-2 max-h-48 overflow-y-auto no-scrollbar w-full px-2">
                             {selectedEmoji.map((e: any, idx: number) => (
-                                <NetImg key={idx} src={e.url} className="w-16 h-16 object-contain rounded-xl border border-slate-200" />
+                                <EmojiImage key={idx} value={e.url} className="w-16 h-16 object-contain rounded-xl border border-slate-200" />
                             ))}
                         </div>
                     ) : (
-                        selectedEmoji && <NetImg src={selectedEmoji.url} className="w-24 h-24 object-contain rounded-xl border" />
+                        selectedEmoji && <EmojiImage value={selectedEmoji.url} className="w-24 h-24 object-contain rounded-xl border" />
                     )}
                     <p className="text-center text-sm text-slate-500">
                         {Array.isArray(selectedEmoji) ? `确定要删除这 ${selectedEmoji.length} 个表情包吗？` : "确定要删除这个表情包吗？"}
@@ -1088,7 +1070,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                 <div className="flex flex-col items-center gap-4 py-1">
                     {selectedEmoji && !Array.isArray(selectedEmoji) && (
                         <div className="flex flex-col items-center gap-2">
-                            <NetImg src={selectedEmoji.url} className="w-20 h-20 object-contain rounded-xl border border-slate-200" />
+                            <EmojiImage value={selectedEmoji.url} className="w-20 h-20 object-contain rounded-xl border border-slate-200" />
                             <span className="text-sm font-medium text-slate-600 max-w-[12rem] truncate">{selectedEmoji.name}</span>
                         </div>
                     )}
@@ -1147,7 +1129,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
             {/* Category Options Modal (shown on long-press) */}
             <Modal isOpen={modalType === 'category-options'} title="分类操作" onClose={() => setModalType('none')}>
                 <div className="space-y-3">
-                    <button onClick={onDownloadCategory} className="w-full py-3 bg-slate-50 text-slate-700 rounded-2xl">下载分类全部原图</button>
+                    <button onClick={onDownloadCategory} className="w-full py-3 bg-slate-50 text-slate-700 rounded-2xl">导出整个分类</button>
                     {selectedCategory && !selectedCategory.isSystem && selectedCategory.id !== 'default' && <button onClick={() => { setNewCategoryName(selectedCategory.name); setModalType('rename-category'); }} className="w-full py-3 bg-slate-50 text-slate-700 rounded-2xl">重命名分类</button>}
                     <button onClick={openVisibilityModal} className="w-full py-3 bg-slate-50 text-slate-700 font-medium rounded-2xl active:bg-slate-100 transition-colors flex items-center justify-center gap-2">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">

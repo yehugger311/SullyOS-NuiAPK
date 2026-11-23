@@ -25,6 +25,7 @@ import { useLocalDateKey } from '../../hooks/useLocalDateKey';
 import { resolveCharTimeZone } from '../../utils/timezone';
 import { RemoteImg } from '../../utils/remoteImgCache';
 import { trackEvent } from '../../utils/analytics';
+import { useConfirmDialog } from '../../hooks/useConfirmDialog';
 
 interface Props {
   charId: string;
@@ -40,8 +41,20 @@ interface Props {
   onOpenRecent?: (charId: string) => void;
 }
 
+function MusicBio({ bio }: { bio?: string }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!bio) return <p className="text-[10px] mt-0.5" style={{ color: C.muted }}>还没写音乐简介</p>;
+  return <button type="button" aria-label={expanded ? '收起音乐简介' : '展开音乐简介'} aria-expanded={expanded}
+    className="flex items-start gap-1 w-full py-1 text-left text-[11px]" style={{ color: C.muted }}
+    onClick={() => { if (!expanded) trackEvent('展开角色音乐简介'); setExpanded(!expanded); }}>
+    <span className={expanded ? 'min-w-0 whitespace-pre-wrap break-words' : 'min-w-0 truncate'}>{bio}</span>
+    <span aria-hidden="true" className="shrink-0">{expanded ? '▴' : '▾'}</span>
+  </button>;
+}
+
 const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer, onOpenPlaylist, onOpenArtist, onOpenSearch, onOpenRecent }) => {
   const { characters, updateCharacter, userProfile, apiConfig, addToast } = useOS();
+  const { requestConfirm, confirmDialog } = useConfirmDialog({ portal: true });
   const {
     cfg,
     current, playing, togglePlay, nextSong, prevSong,
@@ -135,9 +148,12 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer, onOpenPl
   /** 清掉旧档案重新走一次 LLM —— 给旧版保底生成的"告五人"账号用。 */
   const doRegenerate = useCallback(async () => {
     if (!char || initializing) return;
-    const ok = typeof window !== 'undefined'
-      ? window.confirm(`清空 ${char.name} 现有的音乐人格，重新让 LLM 生成？\n（歌单里已填的歌也会丢）`)
-      : true;
+    const ok = await requestConfirm({
+      title: '重新生成音乐人格？',
+      message: `清空 ${char.name} 现有的音乐人格，重新让 LLM 生成？（歌单里已填的歌也会丢失）`,
+      confirmText: '重新生成',
+      variant: 'warning',
+    });
     if (!ok) return;
     setInitializing(true);
     try {
@@ -150,7 +166,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer, onOpenPl
     } finally {
       setInitializing(false);
     }
-  }, [char, initializing, userProfile, apiConfig, updateCharacter, addToast]);
+  }, [char, initializing, requestConfirm, userProfile, apiConfig, updateCharacter, addToast]);
 
   /**
    * 顶栏刷新按钮：根据艺人名搜艺人、OST 标题搜专辑，匹配头像/封面并写回 profile 持久化。
@@ -321,6 +337,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer, onOpenPl
         <div className="flex-1 flex items-center justify-center text-sm" style={{ color: C.muted }}>
           找不到这个角色。
         </div>
+        {confirmDialog}
       </div>
     );
   }
@@ -380,9 +397,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer, onOpenPl
                 style={{ color: C.text, fontFamily: `'Noto Serif', serif` }}>
                 {char.name}
               </div>
-              <div className="text-[10px] mt-0.5 truncate" style={{ color: C.muted }}>
-                {profile?.bio || '还没写音乐简介'}
-              </div>
+              <MusicBio key={char.id} bio={profile?.bio} />
               <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
                 {(profile?.genreTags || []).slice(0, 4).map(tag => (
                   <span key={tag} className="text-[9px] px-2 py-0.5 rounded-full"
@@ -694,7 +709,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer, onOpenPl
                 }}
                 className="w-3 h-3"
               />
-              允许 {char.name} 翻阅你的网易云数据（最近在听 / 歌单）
+              聊天时让 {char.name} 知道你正在听的歌
             </label>
             <div>
               <button
@@ -756,6 +771,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer, onOpenPl
       {showNewPl && (
         <NewPlaylistModal onCancel={() => setShowNewPl(false)} onCreate={createPlaylist} />
       )}
+      {confirmDialog}
     </div>
   );
 };

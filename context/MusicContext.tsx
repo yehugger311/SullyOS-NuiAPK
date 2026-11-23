@@ -14,7 +14,8 @@ import React, {
 import { cachedCall as _cachedCall, invalidate as _invalidateCache, clearAll as _clearAllCache } from '../utils/musicCache';
 import { neteaseCacheClearAll } from '../utils/neteaseCache';
 import { DB } from '../utils/db';
-import { isNativeRuntimePlatform } from '../utils/runtime/nativeRuntime';
+import { getPendingNativeMusicAction, isNativeRuntimePlatform } from '../utils/runtime/nativeRuntime';
+import { watchNativeQueue } from '../utils/runtime/nativeQueueWake';
 import { getProxyWorkerUrl, DEFAULT_PROXY_WORKER, PROXY_WORKER_CHANGED_EVENT, isLegacyProxyWorkerUrl } from '../utils/proxyWorker';
 import type { PostProcessMusicHooks } from '../utils/applyAssistantPostProcessing';
 import { resolveRefToDataUrl } from '../utils/blobRef';
@@ -263,7 +264,9 @@ export const parseLyric = (txt: string): LyricLine[] => {
 
 export const normalizeCookie = (raw: string): string => {
   const s = (raw || '').trim(); if (!s) return '';
-  if (s.toUpperCase().startsWith('MUSIC_U=')) return s;
+  // 用户从浏览器开发者工具整段复制 Cookie 时可能包含多个键值对（如 "NMTID=xxx; MUSIC_U=yyy"），
+  // 已含 MUSIC_U= 时原样保留（顺带保留 NMTID/__csrf），仅在裸填令牌值时补前缀。
+  if (/(?:^|;\s*)MUSIC_U=/i.test(s)) return s;
   return `MUSIC_U=${s}`;
 };
 
@@ -290,7 +293,23 @@ export const musicApi = {
     const url = `${resolveMusicWorkerUrl(cfg)}/netease${path.startsWith('/') ? path : '/' + path}`;
     const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body || {}) });
     const j = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(j?.error || j?.message || `HTTP ${res.status}`);
+    if (!res.ok) {
+      // 兼容尚未更新的自建代理 Worker：detail 标明风控时转成可读提示，其余未知上游失败附带具体原因。
+      const rawErr = j?.error || j?.message || `HTTP ${res.status}`;
+      const detail = typeof j?.detail === 'string' ? j.detail.trim() : '';
+      if (/risk-control|code=-460|code=-7/i.test(detail)) {
+        throw new Error('网易云接口触发风控，请稍后再试');
+      }
+      throw new Error(
+        rawErr === 'netease upstream fetch failed (all sources)' && detail
+          ? `${rawErr} (${detail})`
+          : rawErr
+      );
+    }
+    if (j?.code === -460 || j?.code === -7) {
+      // 单上游旧版 Worker 可能将 HTTP 200 的风控报文直接透传；在此拦截抛错，避免污染本地缓存。
+      throw new Error(j?.message || j?.msg || '网易云接口触发风控，请稍后再试');
+    }
     return j;
   },
   // 对外：默认走 TTL 缓存 + in-flight 去重；无匹配规则的 path 会透传
@@ -755,6 +774,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const progressRef = useRef(progress);
   const durationRef = useRef(duration); durationRef.current = duration;
   const nativeMusicSyncRef = useRef<(() => void) | null>(null);
+  const playSeqRef = useRef(0);
 
   // 初始化 audio（仅 Provider 生命周期创建一次）
   useEffect(() => {
@@ -821,6 +841,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     }
 
+    const seq = ++playSeqRef.current;
     setLoadingSong(true); setLyric([]); setTlyric([]); progressRef.current = 0; setProgress(0); setDuration(0);
     try {
       // ── Local-source branch ── 本地生成的歌（写歌 App 出歌）从 IndexedDB 取 blob
@@ -830,6 +851,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           | { blob?: Blob; mimeType?: string }
           | Blob
           | null;
+        if (seq !== playSeqRef.current) return;
         const blob: Blob | null = entry instanceof Blob ? entry : (entry?.blob instanceof Blob ? entry.blob : null);
         if (!blob) {
           toast('本地歌曲文件丢失', 'error');
@@ -904,10 +926,21 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return;
       }
 
-      const [urlRes, lyricRes] = await Promise.all([
+      // 播放直链与歌词各自结算：直链受风控或版权失败时仍正常落盘歌词，避免播放页误显示 no lyrics。
+      const [urlOutcome, lyricOutcome] = await Promise.allSettled([
         musicApi.songUrl(cfgRef.current, song.id),
-        musicApi.lyric(cfgRef.current, song.id).catch(() => null),
+        musicApi.lyric(cfgRef.current, song.id),
       ]);
+      if (seq !== playSeqRef.current) return;
+      if (lyricOutcome.status === 'fulfilled' && lyricOutcome.value) {
+        const lyricRes = lyricOutcome.value;
+        setLyric(parseLyric(lyricRes?.lrc?.lyric || ''));
+        setTlyric(parseLyric(lyricRes?.tlyric?.lyric || ''));
+      }
+      if (urlOutcome.status === 'rejected') {
+        throw urlOutcome.reason;
+      }
+      const urlRes = urlOutcome.value;
       const url: string | null = urlRes?.data?.[0]?.url || null;
       if (!url) {
         toast(urlRes?.data?.[0]?.fee && !cfgRef.current.cookie ? '需要会员 cookie' : '暂无播放地址', 'error');
@@ -917,10 +950,6 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const a = audioRef.current!;
       a.src = url.replace(/^http:\/\//i, 'https://');
       a.play().catch(() => {});
-      if (lyricRes) {
-        setLyric(parseLyric(lyricRes?.lrc?.lyric || ''));
-        setTlyric(parseLyric(lyricRes?.tlyric?.lyric || ''));
-      }
       // 媒体会话（锁屏 / 通知栏）
       if ('mediaSession' in navigator) {
         try {
@@ -940,9 +969,13 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         } catch {}
       }
     } catch (e: any) {
-      toast(`播放失败：${e.message}`, 'error');
+      if (seq === playSeqRef.current) {
+        toast(`播放失败：${e.message}`, 'error');
+      }
     } finally {
-      setLoadingSong(false);
+      if (seq === playSeqRef.current) {
+        setLoadingSong(false);
+      }
     }
   }, [toast]);
 
@@ -1111,20 +1144,16 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return () => { if (nativeMusicSyncRef.current === send) nativeMusicSyncRef.current = null; };
   }, [current?.id, current?.name, current?.artists, current?.album, playing, liked]);
 
-  // 有媒体会话才轮询；暂停歌曲仍保留通知栏恢复播放功能。
-  const nativeMusicPollInFlightRef = useRef(false);
+  const nativeMusicControls = useRef({ prevSong, nextSong, togglePlay, toggleLike });
+  nativeMusicControls.current = { prevSong, nextSong, togglePlay, toggleLike };
   const hasMusicSession = !!current;
   useEffect(() => {
     if (!hasMusicSession || !isNativeRuntimePlatform()) return;
     let cancelled = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-    const poll = async () => {
-      if (cancelled || nativeMusicPollInFlightRef.current) return;
-      nativeMusicPollInFlightRef.current = true;
-      try {
-        const { getPendingNativeMusicAction } = await import('../utils/runtime/nativeRuntime');
+    const stopWatching = watchNativeQueue('sully-native-music-action', async () => {
         const action = await getPendingNativeMusicAction();
         if (cancelled || !action) return;
+        const { prevSong, nextSong, togglePlay, toggleLike } = nativeMusicControls.current;
         // 系统媒体卡片拖动进度条 → 原生写入 "seek:<ms>"，这里应用到 audio 元素
         if (action.startsWith('seek:')) {
           const ms = Number(action.slice(5));
@@ -1151,16 +1180,12 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             void toggleLike();
             break;
         }
-      } catch { /* ignore */ }
-      finally { nativeMusicPollInFlightRef.current = false; }
-    };
-    // 每 1s 轮询一次 pending action，通知栏点击后 10s 内有效
-    timer = setInterval(() => { void poll(); }, 1000);
+    });
     return () => {
       cancelled = true;
-      if (timer) clearInterval(timer);
+      stopWatching();
     };
-  }, [hasMusicSession, prevSong, nextSong, togglePlay, toggleLike]);
+  }, [hasMusicSession]);
 
   // 把当前播放状态写到模块级快照，供非 React 调用者（OSContext.runProactive
   // 等位于 MusicProvider 上层的代码）读取。useMusic() 在那一层用不了。

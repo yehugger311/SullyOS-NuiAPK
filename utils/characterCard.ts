@@ -21,6 +21,7 @@ export const CARD_STRIPPED_FIELDS = [
   // 1) 凭据（含 apiKey，灾难级泄漏）
   'chatApiOverride',
   'dialogueApi',             // 角色默认对话 API（上游 v3.13）：含 baseUrl/apiKey/model 的整套凭据快照
+  'stickerVision',
   'emotionConfig',
   'embeddingConfig',
   'proactiveConfig',         // 已下线的主动消息 1.0，旧数据里可能还带着副 API 凭据
@@ -40,6 +41,8 @@ export const CARD_STRIPPED_FIELDS = [
   'thinkingChainStyle',
   'thinkingChainCustomColors',
   'thinkingChainCustomPrompt',
+  'thinkingChainPromptMode',
+  'thinkingChainPromptScope',
   'thinkingChainCustomCss',
   'chatCollaborationEnabled', // 用户在本机选择的日常聊天注意力模式
   'chatShowRemark',          // 聊天顶栏显示备注还是名字，由接收方自己决定
@@ -55,6 +58,7 @@ export const CARD_STRIPPED_FIELDS = [
   'dateExtraPresets',        // 用户私有补充预设随系统备份保存，不随角色卡分享
   'memoryPalaceWaterline', // 发卡人的使用节奏；接收方按自己的聊天习惯选择
   'hideMonthlyRecallPrompt', // ChatApp 的旧版记忆调阅提示偏好由接收方自己决定
+  'monthlyRecallEnabled', // 自主月度查阅与 API 消耗偏好由接收方决定
 
   // 4) 运行时状态残留
   'activeBuffs',
